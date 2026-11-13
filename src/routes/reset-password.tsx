@@ -247,7 +247,15 @@ function ResetPasswordPage() {
                   autoComplete="one-time-code"
                   maxLength={6}
                   value={code}
-                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  onChange={(e) =>
+                    setCode(
+                      e.target.value
+                        .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+                        .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+                        .replace(/\D/g, "")
+                        .slice(0, 6),
+                    )
+                  }
                   className="field-input text-center text-lg tracking-[0.4em]"
                   placeholder="000000"
                 />

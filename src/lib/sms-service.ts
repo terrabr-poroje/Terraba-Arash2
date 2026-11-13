@@ -49,8 +49,14 @@ async function recordSmsLog(entry: SmsLogPayload): Promise<void> {
   }
 }
 
+export function toAsciiDigits(value: string): string {
+  return (value || "")
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660));
+}
+
 export function normalizeIranMobile(value: string): string {
-  const digits = (value || "").replace(/[^\d]/g, "");
+  const digits = toAsciiDigits(value || "").replace(/[^\d]/g, "");
   if (digits.startsWith("0098")) return "0" + digits.slice(4);
   if (digits.startsWith("98") && digits.length >= 12) return "0" + digits.slice(2);
   if (digits.startsWith("9") && digits.length === 10) return "0" + digits;
@@ -152,10 +158,9 @@ export async function sendOtpSms(
   const now = Date.now();
   const expiresAt = now + 10 * 60 * 1000;
 
+  otpStore.set(mobile, { code, expiresAt, attempts: 0 });
   if (globalForOtp.__terrabar_otp_hook__?.saveOtp) {
     await globalForOtp.__terrabar_otp_hook__.saveOtp(mobile, "sms", code, expiresAt);
-  } else {
-    otpStore.set(mobile, { code, expiresAt, attempts: 0 });
   }
 
   const isPrimaryKnownNotFound =
@@ -212,7 +217,7 @@ export async function verifyOtpCode(
   inputCode: string,
 ): Promise<{ success: boolean; message: string }> {
   const mobile = normalizeIranMobile(rawMobile);
-  const cleanCode = (inputCode || "").trim();
+  const cleanCode = toAsciiDigits(inputCode || "").trim();
 
   if (!/^09\d{9}$/.test(mobile) || !/^\d{5,6}$/.test(cleanCode)) {
     return { success: false, message: "شماره موبایل یا کد تأیید نامعتبر است." };

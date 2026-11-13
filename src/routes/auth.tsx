@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
-import { CheckCircle2, Clock3, Lock, Mail, Phone, ShieldCheck, Sprout, Store, UserRound } from "lucide-react";
+import { CheckCircle2, Lock, Mail, Phone, ShieldCheck, Sprout, Store, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth, signOut, type AppUser, type AppMember } from "@/lib/auth";
 import { pageHead, provinces, provinceCities } from "@/lib/marketplace";
@@ -43,8 +43,14 @@ const roleOptions: { value: MainRole; title: string; description: string; icon: 
   },
 ];
 
+function toAsciiDigits(value: string) {
+  return value
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660));
+}
+
 function normalizeIranPhone(value: string) {
-  const digits = value.replace(/[^\d+]/g, "");
+  const digits = toAsciiDigits(value).replace(/[^\d+]/g, "");
   if (digits.startsWith("+")) return digits;
   if (digits.startsWith("0098")) return `+${digits.slice(2)}`;
   if (digits.startsWith("98")) return `+${digits}`;
@@ -427,7 +433,7 @@ function AuthPage() {
     }
   }
 
-  if (user && !showOtherAccount && !codeSent && !busy && !error) {
+  if (user && !showOtherAccount && !codeSent && !emailCodeSent && !busy && !error) {
     return (
       <section className="bg-market-surface py-16">
         <div className="site-container max-w-md text-center">
@@ -503,6 +509,7 @@ function AuthPage() {
               onClick={() => {
                 setMode("signup");
                 setCodeSent(false);
+                setEmailCodeSent(false);
                 setError("");
                 setNotice("");
               }}
@@ -517,6 +524,7 @@ function AuthPage() {
               onClick={() => {
                 setMode("login");
                 setCodeSent(false);
+                setEmailCodeSent(false);
                 setError("");
                 setNotice("");
               }}
@@ -535,6 +543,7 @@ function AuthPage() {
               onClick={() => {
                 setAuthMethod("phone");
                 setCodeSent(false);
+                setEmailCodeSent(false);
                 setError("");
                 setNotice("");
               }}
@@ -543,13 +552,14 @@ function AuthPage() {
               }`}
             >
               <Phone className="size-3.5" />
-              ورود با شماره موبایل (پیامک)
+              {mode === "signup" ? "ثبت‌نام با شماره موبایل (پیامک)" : "ورود با شماره موبایل (پیامک)"}
             </button>
             <button
               type="button"
               onClick={() => {
                 setAuthMethod("email");
                 setCodeSent(false);
+                setEmailCodeSent(false);
                 setError("");
                 setNotice("");
               }}
@@ -558,7 +568,7 @@ function AuthPage() {
               }`}
             >
               <Mail className="size-3.5" />
-              ورود با ایمیل
+              {mode === "signup" ? "ثبت‌نام با ایمیل" : "ورود با ایمیل"}
             </button>
           </div>
 
@@ -796,7 +806,7 @@ function AuthPage() {
                         minLength={6}
                         maxLength={6}
                         value={emailCode}
-                        onChange={(e) => setEmailCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                        onChange={(e) => setEmailCode(toAsciiDigits(e.target.value).replace(/\D/g, "").slice(0, 6))}
                         className="field-input text-center text-lg tracking-[0.4em]"
                         placeholder="000000"
                       />
@@ -1158,7 +1168,7 @@ function AuthPage() {
               <button
                 type="button"
                 onClick={() => {
-                  const cleaned = phone.replace(/[^\d]/g, "");
+                  const cleaned = toAsciiDigits(phone).replace(/[^\d]/g, "");
                   if (cleaned.length >= 10) {
                     setCodeSent(true);
                     setError("");
@@ -1190,7 +1200,7 @@ function AuthPage() {
                   minLength={6}
                   maxLength={6}
                   value={code}
-                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  onChange={(e) => setCode(toAsciiDigits(e.target.value).replace(/\D/g, "").slice(0, 6))}
                   className="field-input text-center text-lg tracking-[0.4em]"
                   placeholder="000000"
                 />
@@ -1228,17 +1238,6 @@ function AuthPage() {
             </form>
           )}
 
-          {error && !codeSent && authMethod === "phone" && (
-            <p role="alert" className="mt-3 text-sm text-destructive">
-              {error}
-            </p>
-          )}
-          {notice && !codeSent && authMethod === "phone" && (
-            <p role="status" className="mt-3 flex items-center gap-2 text-sm text-primary">
-              <Clock3 className="size-4" />
-              {notice}
-            </p>
-          )}
           <Button asChild variant="link" className="mt-4 w-full">
             <Link to="/">بازگشت به صفحه اصلی</Link>
           </Button>

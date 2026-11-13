@@ -10,6 +10,8 @@ import {
   normalizeIranMobile,
   registerOtpPersistenceHook,
   sendEventNotificationSms,
+  otpStore,
+  toAsciiDigits,
   type SmsLogPayload,
 } from "./sms-service";
 import {
@@ -53,9 +55,10 @@ let schemaInitPromise: Promise<void> | null = null;
 
 export function setCloudflareD1Binding(db: any) {
   if (db && typeof db.prepare === "function") {
-    cloudflareD1Binding = db;
-    schemaInitPromise = null;
-    void initD1Schema();
+    if (cloudflareD1Binding !== db) {
+      cloudflareD1Binding = db;
+      schemaInitPromise = null;
+    }
   }
 }
 
@@ -545,7 +548,11 @@ export async function initD1Schema(): Promise<void> {
       try {
         await db.exec(stmt + ";");
       } catch {
-        // Ignore if exists
+        try {
+          await db.prepare(stmt).run();
+        } catch {
+          // Ignore if exists
+        }
       }
     }
 
@@ -692,28 +699,60 @@ export async function initD1Schema(): Promise<void> {
 // OTP, Rate Limit, Logs & Sequence Helpers
 // ==========================================
 
+function normalizeOtpTarget(target: string): string {
+  const trimmed = toAsciiDigits(target || "").trim().toLowerCase();
+  if (!trimmed) return "";
+  if (trimmed.includes("@")) return trimmed;
+  return normalizeIranMobile(trimmed) || trimmed;
+}
+
 export async function saveOtpToD1(
   target: string,
   channel: "sms" | "email",
   code: string,
   expiresAt: number,
 ): Promise<void> {
+  const cleanTarget = normalizeOtpTarget(target);
+  const cleanCode = toAsciiDigits(code || "").trim();
+  otpStore.set(cleanTarget, { code: cleanCode, expiresAt, attempts: 0 });
+
   await initD1Schema();
   const db = getD1();
-  const cleanTarget = target.trim().toLowerCase();
-  await db
-    .prepare(
-      `INSERT INTO otp_codes (target, channel, code, expires_at, attempts, last_sent_at, created_at)
-       VALUES (?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(target) DO UPDATE SET
-         channel = excluded.channel,
-         code = excluded.code,
-         expires_at = excluded.expires_at,
-         attempts = 0,
-         last_sent_at = excluded.last_sent_at`,
-    )
-    .bind(cleanTarget, channel, code, expiresAt, Date.now())
-    .run();
+  const nowMs = Date.now();
+
+  try {
+    await db
+      .prepare(
+        `INSERT INTO otp_codes (target, channel, code, expires_at, attempts, last_sent_at, created_at)
+         VALUES (?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(target) DO UPDATE SET
+           channel = excluded.channel,
+           code = excluded.code,
+           expires_at = excluded.expires_at,
+           attempts = 0,
+           last_sent_at = excluded.last_sent_at`,
+      )
+      .bind(cleanTarget, channel, cleanCode, expiresAt, nowMs)
+      .run();
+  } catch {
+    try {
+      await db
+        .prepare(
+          "CREATE TABLE IF NOT EXISTS otp_codes (target TEXT PRIMARY KEY, channel TEXT, code TEXT, expires_at INTEGER, attempts INTEGER DEFAULT 0, last_sent_at INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+        )
+        .run();
+      await db.prepare("DELETE FROM otp_codes WHERE target = ?").bind(cleanTarget).run();
+      await db
+        .prepare(
+          `INSERT INTO otp_codes (target, channel, code, expires_at, attempts, last_sent_at, created_at)
+           VALUES (?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP)`,
+        )
+        .bind(cleanTarget, channel, cleanCode, expiresAt, nowMs)
+        .run();
+    } catch (err) {
+      console.warn("[d1] saveOtpToD1 fallback to memory store:", err);
+    }
+  }
 }
 
 export async function verifyOtpFromD1(
@@ -722,41 +761,79 @@ export async function verifyOtpFromD1(
 ): Promise<{ success: boolean; message: string }> {
   await initD1Schema();
   const db = getD1();
-  const cleanTarget = target.trim().toLowerCase();
-  const cleanCode = (inputCode || "").trim();
+  const rawLower = (target || "").trim().toLowerCase();
+  const cleanTarget = normalizeOtpTarget(target);
+  const cleanCode = toAsciiDigits(inputCode || "").trim();
 
-  const row = await db
-    .prepare("SELECT * FROM otp_codes WHERE target = ? LIMIT 1")
-    .bind(cleanTarget)
-    .first<any>();
+  let matchedTarget = cleanTarget;
+  let row: any = null;
+  try {
+    row = await db
+      .prepare("SELECT * FROM otp_codes WHERE target = ? LIMIT 1")
+      .bind(cleanTarget)
+      .first<any>();
+    if (!row && rawLower && rawLower !== cleanTarget) {
+      row = await db
+        .prepare("SELECT * FROM otp_codes WHERE target = ? LIMIT 1")
+        .bind(rawLower)
+        .first<any>();
+      if (row) matchedTarget = rawLower;
+    }
+  } catch (err) {
+    console.warn("[d1] verifyOtpFromD1 query error, checking memory store:", err);
+  }
 
   if (!row) {
-    return {
-      success: false,
-      message: "کد تأییدی برای این شناسه ثبت نشده یا منقضی شده است. لطفاً مجدداً درخواست کد دهید.",
-    };
+    const memKey = otpStore.has(cleanTarget) ? cleanTarget : rawLower;
+    const memStored = memKey ? otpStore.get(memKey) : undefined;
+    if (!memStored) {
+      return {
+        success: false,
+        message: "کد تأییدی برای این شناسه ثبت نشده یا منقضی شده است. لطفاً مجدداً درخواست کد دهید.",
+      };
+    }
+    if (Date.now() > memStored.expiresAt) {
+      otpStore.delete(memKey);
+      return { success: false, message: "کد تأیید منقضی شده است. لطفاً کد جدید دریافت کنید." };
+    }
+    memStored.attempts += 1;
+    if (memStored.attempts > 5) {
+      otpStore.delete(memKey);
+      return { success: false, message: "تعداد تلاش‌های ناموفق بیش از حد مجاز بود. کد جدید درخواست دهید." };
+    }
+    if (String(memStored.code) !== cleanCode) {
+      return { success: false, message: "کد تأیید وارد شده صحیح نیست. لطفاً دوباره بررسی کنید." };
+    }
+    otpStore.delete(memKey);
+    return { success: true, message: "کد تأیید با موفقیت احراز شد." };
   }
 
   if (Date.now() > Number(row.expires_at)) {
-    await db.prepare("DELETE FROM otp_codes WHERE target = ?").bind(cleanTarget).run();
+    await db.prepare("DELETE FROM otp_codes WHERE target = ?").bind(matchedTarget).run();
+    otpStore.delete(cleanTarget);
+    otpStore.delete(matchedTarget);
     return { success: false, message: "کد تأیید منقضی شده است. لطفاً کد جدید دریافت کنید." };
   }
 
   const nextAttempts = Number(row.attempts || 0) + 1;
   if (nextAttempts > 5) {
-    await db.prepare("DELETE FROM otp_codes WHERE target = ?").bind(cleanTarget).run();
+    await db.prepare("DELETE FROM otp_codes WHERE target = ?").bind(matchedTarget).run();
+    otpStore.delete(cleanTarget);
+    otpStore.delete(matchedTarget);
     return { success: false, message: "تعداد تلاش‌های ناموفق بیش از حد مجاز بود. کد جدید درخواست دهید." };
   }
 
   if (String(row.code) !== cleanCode) {
     await db
       .prepare("UPDATE otp_codes SET attempts = ? WHERE target = ?")
-      .bind(nextAttempts, cleanTarget)
+      .bind(nextAttempts, matchedTarget)
       .run();
     return { success: false, message: "کد تأیید وارد شده صحیح نیست. لطفاً دوباره بررسی کنید." };
   }
 
-  await db.prepare("DELETE FROM otp_codes WHERE target = ?").bind(cleanTarget).run();
+  await db.prepare("DELETE FROM otp_codes WHERE target = ?").bind(matchedTarget).run();
+  otpStore.delete(cleanTarget);
+  otpStore.delete(matchedTarget);
   return { success: true, message: "کد تأیید با موفقیت احراز شد." };
 }
 
@@ -1975,10 +2052,10 @@ export async function resetUserPasswordWithOtp(params: {
 }): Promise<{ success: boolean; message: string }> {
   await initD1Schema();
   const db = getD1();
-  const rawId = (params.identifier || "").trim();
+  const rawId = toAsciiDigits(params.identifier || "").trim();
   const isEmail = rawId.includes("@");
   const cleanId = isEmail ? rawId.toLowerCase() : normalizeIranMobile(rawId);
-  const cleanCode = (params.code || "").trim();
+  const cleanCode = toAsciiDigits(params.code || "").trim();
   const newPass = (params.newPassword || "").trim();
 
   if (!cleanCode || cleanCode.length < 5) {
@@ -1989,9 +2066,24 @@ export async function resetUserPasswordWithOtp(params: {
     return { success: false, message: "کلمه عبور جدید باید حداقل ۶ کاراکتر باشد." };
   }
 
-  const verifyResult = isEmail
+  let verifyResult = isEmail
     ? await verifyEmailOtpCode(cleanId, cleanCode)
     : await verifyOtpCode(cleanId, cleanCode);
+
+  if (!verifyResult.success && verifyResult.message.includes("ثبت نشده")) {
+    const user = isEmail
+      ? (await db.prepare("SELECT phone, email FROM users WHERE LOWER(email) = ? LIMIT 1").bind(cleanId).first<any>()) ||
+        (await db.prepare("SELECT phone, email FROM members WHERE LOWER(email) = ? LIMIT 1").bind(cleanId).first<any>())
+      : (await db.prepare("SELECT phone, email FROM users WHERE phone = ? LIMIT 1").bind(cleanId).first<any>()) ||
+        (await db.prepare("SELECT phone, email FROM members WHERE phone = ? LIMIT 1").bind(cleanId).first<any>());
+    if (user) {
+      if (isEmail && user.phone) {
+        verifyResult = await verifyOtpCode(normalizeIranMobile(user.phone), cleanCode);
+      } else if (!isEmail && user.email) {
+        verifyResult = await verifyEmailOtpCode(String(user.email).toLowerCase(), cleanCode);
+      }
+    }
+  }
 
   if (!verifyResult.success) {
     return { success: false, message: verifyResult.message };

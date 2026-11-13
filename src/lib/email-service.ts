@@ -4,7 +4,7 @@
  */
 
 import { getEnvVar } from "./runtime-env";
-import { generateOtpCode, otpStore, type SmsLogPayload } from "./sms-service";
+import { generateOtpCode, otpStore, toAsciiDigits, type SmsLogPayload } from "./sms-service";
 
 type EmailPersistenceHook = {
   saveOtp: (target: string, channel: "sms" | "email", code: string, expiresAt: number) => Promise<void>;
@@ -159,10 +159,9 @@ export async function sendOtpEmail(
   const code = generateOtpCode();
   const expiresAt = Date.now() + 10 * 60 * 1000;
 
+  otpStore.set(email, { code, expiresAt, attempts: 0 });
   if (globalForEmailHook.__terrabar_email_hook__?.saveOtp) {
     await globalForEmailHook.__terrabar_email_hook__.saveOtp(email, "email", code, expiresAt);
-  } else {
-    otpStore.set(email, { code, expiresAt, attempts: 0 });
   }
 
   const subtitle =
@@ -224,7 +223,7 @@ export async function verifyEmailOtpCode(
   inputCode: string,
 ): Promise<{ success: boolean; message: string }> {
   const email = normalizeEmail(rawEmail);
-  const cleanCode = (inputCode || "").trim();
+  const cleanCode = toAsciiDigits(inputCode || "").trim();
 
   if (!isValidEmail(email) || !/^\d{5,6}$/.test(cleanCode)) {
     return { success: false, message: "نشانی ایمیل یا کد تأیید نامعتبر است." };
