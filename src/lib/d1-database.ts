@@ -563,61 +563,222 @@ export async function initD1Schema(): Promise<void> {
       }
     }
 
-    const alterStatements = [
-      "ALTER TABLE users ADD COLUMN password_hash TEXT;",
-      "ALTER TABLE sessions ADD COLUMN email TEXT;",
-      "ALTER TABLE members ADD COLUMN email TEXT;",
-      "ALTER TABLE members ADD COLUMN is_archived INTEGER DEFAULT 0;",
-      "ALTER TABLE members ADD COLUMN joined_at TEXT;",
-      "ALTER TABLE member_roles ADD COLUMN request_note TEXT;",
-      "ALTER TABLE member_roles ADD COLUMN approved_at TEXT;",
-      "ALTER TABLE member_roles ADD COLUMN approved_by TEXT;",
-      "ALTER TABLE admin_users ADD COLUMN display_name TEXT;",
-      "ALTER TABLE admin_users ADD COLUMN login_username TEXT;",
-      "ALTER TABLE admin_users ADD COLUMN city TEXT;",
-      "ALTER TABLE admin_users ADD COLUMN password_hash TEXT;",
-      "ALTER TABLE loads ADD COLUMN ad_start_date TEXT;",
-      "ALTER TABLE loads ADD COLUMN ad_end_date TEXT;",
-      "ALTER TABLE loads ADD COLUMN response_start_time TEXT;",
-      "ALTER TABLE loads ADD COLUMN response_end_time TEXT;",
-      "ALTER TABLE loads ADD COLUMN destination_scope TEXT;",
-      "ALTER TABLE loads ADD COLUMN fleet_type TEXT;",
-      "ALTER TABLE loads ADD COLUMN archived_at TEXT;",
-      "ALTER TABLE orders ADD COLUMN idempotency_key TEXT;",
-      "ALTER TABLE orders ADD COLUMN customer_email TEXT;",
-      "ALTER TABLE orders ADD COLUMN sale_type TEXT;",
-      "ALTER TABLE orders ADD COLUMN paid_at TEXT;",
-      "ALTER TABLE orders ADD COLUMN shipped_at TEXT;",
-      "ALTER TABLE orders ADD COLUMN delivered_at TEXT;",
-      "ALTER TABLE purchase_requests ADD COLUMN request_number INTEGER;",
-      "ALTER TABLE purchase_requests ADD COLUMN buyer_member_id TEXT;",
-      "ALTER TABLE purchase_requests ADD COLUMN quantity_unit TEXT;",
-      "ALTER TABLE purchase_requests ADD COLUMN destination_city TEXT;",
-      "ALTER TABLE purchase_requests ADD COLUMN quality_requirements TEXT;",
-      "ALTER TABLE purchase_requests ADD COLUMN needed_by TEXT;",
-      "ALTER TABLE purchase_requests ADD COLUMN notes TEXT;",
-      "ALTER TABLE purchase_requests ADD COLUMN updated_at TEXT;",
-      "ALTER TABLE ratings ADD COLUMN reviewer_member_id TEXT;",
-      "ALTER TABLE ratings ADD COLUMN target_member_id TEXT;",
-      "ALTER TABLE ratings ADD COLUMN target_type TEXT;",
-      "ALTER TABLE ratings ADD COLUMN target_load_id TEXT;",
-      "ALTER TABLE ratings ADD COLUMN is_visible INTEGER DEFAULT 1;",
-      "ALTER TABLE site_visits ADD COLUMN visited_at TEXT;",
-      "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency ON orders(idempotency_key);",
-      "CREATE INDEX IF NOT EXISTS idx_loads_member ON loads(member_id);",
-      "CREATE INDEX IF NOT EXISTS idx_load_images_load ON load_images(load_id);",
-      "CREATE INDEX IF NOT EXISTS idx_load_tiers_load ON load_price_tiers(load_id);",
-      "CREATE INDEX IF NOT EXISTS idx_carts_user ON carts(user_id);",
+    const requiredColumnsByTable: Record<string, Record<string, string>> = {
+      users: {
+        phone: "TEXT",
+        email: "TEXT",
+        password_hash: "TEXT",
+        full_name: "TEXT",
+        role: "TEXT DEFAULT 'buyer'",
+        city: "TEXT",
+        province: "TEXT",
+        activity: "TEXT",
+        is_verified: "INTEGER DEFAULT 1",
+        created_at: "TEXT",
+        updated_at: "TEXT",
+      },
+      members: {
+        auth_user_id: "TEXT",
+        full_name: "TEXT",
+        phone: "TEXT",
+        email: "TEXT",
+        city: "TEXT",
+        province: "TEXT",
+        role: "TEXT DEFAULT 'buyer'",
+        verification_status: "TEXT DEFAULT 'approved'",
+        products: "TEXT",
+        is_active: "INTEGER DEFAULT 1",
+        is_archived: "INTEGER DEFAULT 0",
+        joined_at: "TEXT",
+        created_at: "TEXT",
+        updated_at: "TEXT",
+      },
+      member_roles: {
+        member_id: "TEXT",
+        role_code: "TEXT",
+        approval_status: "TEXT DEFAULT 'pending'",
+        request_note: "TEXT",
+        approved_at: "TEXT",
+        approved_by: "TEXT",
+        created_at: "TEXT",
+      },
+      admin_users: {
+        auth_user_id: "TEXT",
+        display_name: "TEXT",
+        login_username: "TEXT",
+        city: "TEXT",
+        password_hash: "TEXT",
+        admin_role: "TEXT DEFAULT 'main_admin'",
+        is_active: "INTEGER DEFAULT 1",
+        created_at: "TEXT",
+      },
+      sessions: {
+        user_id: "TEXT",
+        token: "TEXT",
+        phone: "TEXT",
+        email: "TEXT",
+        expires_at: "INTEGER",
+        created_at: "TEXT",
+      },
+      otp_codes: {
+        channel: "TEXT",
+        code: "TEXT",
+        expires_at: "INTEGER",
+        attempts: "INTEGER DEFAULT 0",
+        last_sent_at: "INTEGER",
+        created_at: "TEXT",
+      },
+      loads: {
+        member_id: "TEXT",
+        owner_member_id: "TEXT",
+        name: "TEXT",
+        product_type: "TEXT",
+        category: "TEXT",
+        engine: "TEXT",
+        city: "TEXT",
+        origin: "TEXT",
+        source_region: "TEXT",
+        source_market: "TEXT",
+        quality: "TEXT",
+        quantity: "REAL",
+        count: "INTEGER",
+        price: "REAL",
+        price_unit: "TEXT DEFAULT 'تومان'",
+        sale_type: "TEXT",
+        status: "TEXT DEFAULT 'active'",
+        package_type: "TEXT",
+        package_weight: "REAL",
+        min_quantity: "REAL",
+        min_order_quantity: "REAL",
+        ready_date: "TEXT",
+        ad_start_date: "TEXT",
+        ad_end_date: "TEXT",
+        response_start_time: "TEXT",
+        response_end_time: "TEXT",
+        destination_scope: "TEXT",
+        fleet_type: "TEXT",
+        archived_at: "TEXT",
+        description: "TEXT",
+        seller_type: "TEXT",
+        role: "TEXT",
+        unit: "TEXT DEFAULT 'کیلوگرم'",
+        created_at: "TEXT",
+        updated_at: "TEXT",
+      },
+      orders: {
+        invoice_number: "TEXT",
+        idempotency_key: "TEXT",
+        load_id: "TEXT",
+        buyer_member_id: "TEXT",
+        seller_member_id: "TEXT",
+        customer_name: "TEXT",
+        customer_phone: "TEXT",
+        customer_email: "TEXT",
+        customer_city: "TEXT",
+        sale_type: "TEXT",
+        quantity: "REAL",
+        unit: "TEXT DEFAULT 'کیلوگرم'",
+        price: "REAL",
+        total_price: "REAL",
+        delivery_address: "TEXT",
+        delivery_type: "TEXT",
+        status: "TEXT DEFAULT 'pending'",
+        payment_status: "TEXT DEFAULT 'pending'",
+        delivery_status: "TEXT DEFAULT 'pending'",
+        paid_at: "TEXT",
+        shipped_at: "TEXT",
+        delivered_at: "TEXT",
+        notes: "TEXT",
+        created_at: "TEXT",
+        updated_at: "TEXT",
+      },
+      purchase_requests: {
+        request_number: "INTEGER",
+        member_id: "TEXT",
+        buyer_member_id: "TEXT",
+        load_id: "TEXT",
+        product_name: "TEXT",
+        quantity: "REAL",
+        quantity_unit: "TEXT DEFAULT 'کیلوگرم'",
+        max_price: "REAL",
+        city: "TEXT",
+        destination_city: "TEXT",
+        quality_requirements: "TEXT",
+        needed_by: "TEXT",
+        details: "TEXT",
+        notes: "TEXT",
+        status: "TEXT DEFAULT 'open'",
+        created_at: "TEXT",
+        updated_at: "TEXT",
+      },
+      ratings: {
+        rater_member_id: "TEXT",
+        reviewer_member_id: "TEXT",
+        rated_member_id: "TEXT",
+        target_member_id: "TEXT",
+        target_type: "TEXT DEFAULT 'member'",
+        load_id: "TEXT",
+        target_load_id: "TEXT",
+        order_id: "TEXT",
+        score: "INTEGER",
+        review_text: "TEXT",
+        status: "TEXT DEFAULT 'approved'",
+        is_visible: "INTEGER DEFAULT 1",
+        created_at: "TEXT",
+      },
+      site_visits: {
+        user_id: "TEXT",
+        member_id: "TEXT",
+        route: "TEXT",
+        visited_at: "TEXT",
+        created_at: "TEXT",
+      },
+    };
+
+    for (const [tableName, expectedCols] of Object.entries(requiredColumnsByTable)) {
+      let existingCols: Set<string> | null = null;
+      try {
+        const info = await db.prepare(`PRAGMA table_info('${tableName}')`).all<{ name: string }>();
+        if (Array.isArray(info?.results) && info.results.length > 0) {
+          existingCols = new Set(info.results.map((r) => String(r.name || "").toLowerCase()));
+        }
+      } catch {
+        // Fallback to direct ALTER statements
+      }
+
+      for (const [colName, colDef] of Object.entries(expectedCols)) {
+        if (existingCols && existingCols.has(colName.toLowerCase())) {
+          continue;
+        }
+        const alterSql = `ALTER TABLE ${tableName} ADD COLUMN ${colName} ${colDef}`;
+        try {
+          await db.prepare(alterSql).run();
+        } catch {
+          try {
+            await db.exec(alterSql + ";");
+          } catch {
+            // Ignore if column already exists
+          }
+        }
+      }
+    }
+
+    const indexStatements = [
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency ON orders(idempotency_key)",
+      "CREATE INDEX IF NOT EXISTS idx_loads_member ON loads(member_id)",
+      "CREATE INDEX IF NOT EXISTS idx_load_images_load ON load_images(load_id)",
+      "CREATE INDEX IF NOT EXISTS idx_load_tiers_load ON load_price_tiers(load_id)",
+      "CREATE INDEX IF NOT EXISTS idx_carts_user ON carts(user_id)",
     ];
 
-    for (const alt of alterStatements) {
+    for (const idxStmt of indexStatements) {
       try {
-        await db.exec(alt);
+        await db.prepare(idxStmt).run();
       } catch {
         try {
-          await db.prepare(alt.replace(/;\s*$/, "")).run();
+          await db.exec(idxStmt + ";");
         } catch {
-          // Ignore if column/index already exists
+          // Ignore if index exists
         }
       }
     }
