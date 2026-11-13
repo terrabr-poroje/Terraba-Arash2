@@ -42,15 +42,25 @@ export async function apiFetch<T = any>(
     }
   }
 
-  const res = await fetch(path, {
-    method: options.method || "GET",
-    headers,
-    body: bodyPayload,
-    credentials: "same-origin",
-  });
+  try {
+    const res = await fetch(path, {
+      method: options.method || "GET",
+      headers,
+      body: bodyPayload,
+      credentials: "same-origin",
+      cache: "no-store",
+    });
 
-  const data = (await res.json().catch(() => ({}))) as T;
-  return { ok: res.ok, status: res.status, data };
+    const data = (await res.json().catch(() => ({}))) as T;
+    return { ok: res.ok, status: res.status, data };
+  } catch (err) {
+    console.warn("[apiFetch] network error:", path, err);
+    return {
+      ok: false,
+      status: 0,
+      data: { success: false, message: "خطا در برقراری ارتباط با سرور. لطفاً دوباره تلاش کنید." } as T,
+    };
+  }
 }
 
 export async function apiGet<T = any>(path: string): Promise<{ ok: boolean; status: number; data: T }> {

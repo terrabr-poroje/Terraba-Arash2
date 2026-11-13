@@ -1293,17 +1293,35 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
     if (pathname === "/api/admin/approve-request" && method === "POST") {
       const parsed = await parseJson(
         request,
-        z.object({ roleId: z.string().min(1), action: z.enum(["approved", "rejected"]) }),
+        z.object({
+          roleId: z.string().min(1).optional(),
+          id: z.string().min(1).optional(),
+          action: z.enum(["approved", "rejected"]),
+        }),
       );
       if (parsed.error || !parsed.data) return jsonResponse({ success: false, message: parsed.error }, 400);
 
+      const targetId = (parsed.data.roleId || parsed.data.id || "").trim();
+      if (!targetId) {
+        return jsonResponse({ success: false, message: "شناسه درخواست عضویت نامعتبر است." }, 400);
+      }
+
       const success = await updateRoleApprovalStatus(
-        parsed.data.roleId,
+        targetId,
         parsed.data.action,
         session!.user.id,
       );
+      if (!success) {
+        return jsonResponse(
+          { success: false, message: "درخواست مورد نظر پیدا نشد یا به‌روزرسانی وضعیت در پایگاه داده انجام نشد." },
+          400,
+        );
+      }
+
       return jsonResponse({
-        success,
+        success: true,
+        roleId: targetId,
+        approvalStatus: parsed.data.action,
         message:
           parsed.data.action === "approved"
             ? "عضویت و دسترسی با موفقیت تأیید شد."

@@ -101,15 +101,23 @@ type AdminTab =
   | "security"
   | "backup";
 
+const approvalStatusLabels: Record<string, string> = {
+  pending: "در انتظار بررسی",
+  approved: "تأییدشده",
+  rejected: "ردشده",
+};
+
 type MemberRequest = {
   id: string;
   member_id: string;
   role_code: string;
   approval_status: string;
   created_at: string;
+  approved_at?: string | null;
   request_note?: string | null;
   member_name?: string;
   member_phone?: string;
+  member_email?: string | null;
   member_city?: string;
   member_province?: string;
 };
@@ -320,6 +328,9 @@ function AdminPage() {
   const [tab, setTab] = useState<AdminTab>("requests");
 
   const [requests, setRequests] = useState<MemberRequest[]>([]);
+  const [allRoleRequests, setAllRoleRequests] = useState<MemberRequest[]>([]);
+  const [requestFilter, setRequestFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
+  const [actionFeedback, setActionFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [members, setMembers] = useState<CityMember[]>([]);
   const [loads, setLoads] = useState<AdminLoad[]>([]);
   const [orders, setOrders] = useState<AdminOrder[]>([]);
@@ -396,16 +407,22 @@ function AdminPage() {
   const [dbStats, setDbStats] = useState<any>(null);
   const [loadingDbStats, setLoadingDbStats] = useState(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (silent = false) => {
     if (!canManage) return;
-    setRefreshing(true);
+    if (!silent) setRefreshing(true);
     const res = await apiGet<any>("/api/admin/dashboard-data");
-    setRefreshing(false);
+    if (!silent) setRefreshing(false);
     if (!res.ok || !res.data?.success) {
+      if (!silent) {
+        const msg = res.data?.message || "دریافت اطلاعات داشبورد از سرور با خطا مواجه شد.";
+        setActionFeedback({ type: "error", text: msg });
+        toast.error(msg);
+      }
       return;
     }
     const d = res.data;
     setRequests(d.pendingRoleRequests || []);
+    setAllRoleRequests(d.roleRequests || d.pendingRoleRequests || []);
     setMembers(d.members || []);
     setLoads(d.loads || []);
     setOrders(d.orders || []);
@@ -427,9 +444,9 @@ function AdminPage() {
     if (!canManage) return;
     void refresh();
     const intervalId = window.setInterval(() => {
-      void refresh();
+      void refresh(true);
     }, 15000);
-    const onReq = () => void refresh();
+    const onReq = () => void refresh(true);
     window.addEventListener("terrabar-request-submitted", onReq);
     return () => {
       window.clearInterval(intervalId);
@@ -448,17 +465,60 @@ function AdminPage() {
 
   async function handleApproveRequest(request: MemberRequest, action: "approved" | "rejected") {
     setBusyId(request.id);
-    const res = await apiPost("/api/admin/approve-request", { roleId: request.id, action });
+    setActionFeedback(null);
+    const res = await apiPost<any>("/api/admin/approve-request", { roleId: request.id, action });
     setBusyId("");
     if (res.ok && res.data?.success) {
-      toast.success(
-        action === "approved"
-          ? "عضویت و امکانات فروش با موفقیت تأیید شد."
-          : "درخواست عضویت رد شد.",
+      const nowIso = new Date().toISOString();
+      const wasPending = request.approval_status === "pending";
+      const matchReq = (r: MemberRequest) =>
+        r.id === request.id || (r.member_id === request.member_id && r.role_code === request.role_code);
+
+      setAllRoleRequests((prev) =>
+        prev.map((r) =>
+          matchReq(r)
+            ? {
+                ...r,
+                approval_status: action,
+                approved_at: action === "approved" ? nowIso : r.approved_at,
+              }
+            : r,
+        ),
       );
-      void refresh();
+      setRequests((prev) => prev.filter((r) => !matchReq(r)));
+      setMembers((prev) =>
+        prev.map((m) =>
+          m.id === request.member_id
+            ? {
+                ...m,
+                verification_status: action,
+                member_roles: (m.member_roles || []).map((mr) =>
+                  mr.id === request.id || mr.role_code === request.role_code
+                    ? { ...mr, approval_status: action }
+                    : mr,
+                ),
+              }
+            : m,
+        ),
+      );
+      if (wasPending && action === "approved") {
+        setPerfStats((prev) =>
+          prev ? { ...prev, approvedMembers: prev.approvedMembers + 1 } : prev,
+        );
+      }
+
+      const msg =
+        res.data?.message ||
+        (action === "approved"
+          ? `درخواست ${request.member_name || "کاربر"} با موفقیت تأیید شد.`
+          : `درخواست ${request.member_name || "کاربر"} رد شد.`);
+      setActionFeedback({ type: "success", text: msg });
+      toast.success(msg);
+      void refresh(true);
     } else {
-      toast.error(res.data?.message || "به‌روزرسانی وضعیت درخواست انجام نشد.");
+      const msg = res.data?.message || "به‌روزرسانی وضعیت درخواست انجام نشد.";
+      setActionFeedback({ type: "error", text: msg });
+      toast.error(msg);
     }
   }
 
@@ -510,13 +570,35 @@ function AdminPage() {
       return;
     }
     setBusyId(loadId);
+    setActionFeedback(null);
     const res = await apiPost("/api/admin/load-action", { loadId, action });
     setBusyId("");
     if (res.ok && res.data?.success) {
-      toast.success(res.data?.message || "عملیات روی بار انجام شد.");
-      void refresh();
+      setLoads((prev) =>
+        action === "delete" || action === "archive"
+          ? prev.filter((l) => l.id !== loadId)
+          : prev.map((l) =>
+              l.id === loadId
+                ? {
+                    ...l,
+                    status:
+                      action === "approve"
+                        ? "active"
+                        : action === "reject"
+                          ? "rejected"
+                          : "inactive",
+                  }
+                : l,
+            ),
+      );
+      const msg = res.data?.message || "عملیات روی بار انجام شد.";
+      setActionFeedback({ type: "success", text: msg });
+      toast.success(msg);
+      void refresh(true);
     } else {
-      toast.error(res.data?.message || "عملیات روی بار انجام نشد.");
+      const msg = res.data?.message || "عملیات روی بار انجام نشد.";
+      setActionFeedback({ type: "error", text: msg });
+      toast.error(msg);
     }
   }
 
@@ -566,13 +648,29 @@ function AdminPage() {
     action: "accept" | "reject" | "ship" | "deliver" | "mark_paid",
   ) {
     setBusyId(orderId);
+    setActionFeedback(null);
     const res = await apiPost("/api/orders/update-status", { orderId, action });
     setBusyId("");
     if (res.ok && res.data?.success) {
-      toast.success(res.data?.message || "وضعیت سفارش به‌روزرسانی شد.");
-      void refresh();
+      setOrders((prev) =>
+        prev.map((o) => {
+          if (o.id !== orderId) return o;
+          if (action === "accept") return { ...o, status: "accepted" };
+          if (action === "reject") return { ...o, status: "rejected" };
+          if (action === "mark_paid") return { ...o, payment_status: "paid" };
+          if (action === "ship") return { ...o, delivery_status: "shipped" };
+          if (action === "deliver") return { ...o, delivery_status: "delivered" };
+          return o;
+        }),
+      );
+      const msg = res.data?.message || "وضعیت سفارش به‌روزرسانی شد.";
+      setActionFeedback({ type: "success", text: msg });
+      toast.success(msg);
+      void refresh(true);
     } else {
-      toast.error(res.data?.message || "تغییر وضعیت سفارش انجام نشد.");
+      const msg = res.data?.message || "تغییر وضعیت سفارش انجام نشد.";
+      setActionFeedback({ type: "error", text: msg });
+      toast.error(msg);
     }
   }
 
@@ -581,28 +679,46 @@ function AdminPage() {
     status: "open" | "matched" | "closed" | "cancelled",
   ) {
     setBusyId(request.id);
+    setActionFeedback(null);
     const res = await apiPost("/api/purchase-requests/update-status", { id: request.id, status });
     setBusyId("");
     if (res.ok && res.data?.success) {
-      toast.success("وضعیت درخواست خرید تغییر کرد.");
-      void refresh();
+      setPurchaseRequests((prev) =>
+        prev.map((p) => (p.id === request.id ? { ...p, status } : p)),
+      );
+      const msg = "وضعیت درخواست خرید تغییر کرد.";
+      setActionFeedback({ type: "success", text: msg });
+      toast.success(msg);
+      void refresh(true);
     } else {
-      toast.error(res.data?.message || "به‌روزرسانی وضعیت درخواست خرید انجام نشد.");
+      const msg = res.data?.message || "به‌روزرسانی وضعیت درخواست خرید انجام نشد.";
+      setActionFeedback({ type: "error", text: msg });
+      toast.error(msg);
     }
   }
 
   async function verifyBankAccount(account: AdminBankAccount, status: "verified" | "rejected") {
     setFinanceBusy(true);
+    setActionFeedback(null);
     const res = await apiPost("/api/admin/finance/verify-bank", {
       memberId: account.member_id,
       status,
     });
     setFinanceBusy(false);
     if (res.ok && res.data?.success) {
-      toast.success(status === "verified" ? "شماره شبای فروشنده تأیید شد." : "شماره شبا رد شد.");
-      void refresh();
+      setBankAccounts((prev) =>
+        prev.map((b) =>
+          b.member_id === account.member_id ? { ...b, verification_status: status } : b,
+        ),
+      );
+      const msg = status === "verified" ? "شماره شبای فروشنده تأیید شد." : "شماره شبا رد شد.";
+      setActionFeedback({ type: "success", text: msg });
+      toast.success(msg);
+      void refresh(true);
     } else {
-      toast.error(res.data?.message || "تغییر وضعیت حساب بانکی انجام نشد.");
+      const msg = res.data?.message || "تغییر وضعیت حساب بانکی انجام نشد.";
+      setActionFeedback({ type: "error", text: msg });
+      toast.error(msg);
     }
   }
 
@@ -836,6 +952,14 @@ function AdminPage() {
   }
 
   const pendingLoads = loads.filter((l) => l.status === "pending");
+  const requestList = allRoleRequests.length > 0 ? allRoleRequests : requests;
+  const pendingRequestCount = requestList.filter((r) => r.approval_status === "pending").length;
+  const approvedRequestCount = requestList.filter((r) => r.approval_status === "approved").length;
+  const rejectedRequestCount = requestList.filter((r) => r.approval_status === "rejected").length;
+  const filteredRequests =
+    requestFilter === "all"
+      ? requestList
+      : requestList.filter((r) => r.approval_status === requestFilter);
 
   return (
     <section className="bg-market-surface py-10">
@@ -992,55 +1116,155 @@ function AdminPage() {
           )}
         </div>
 
+        {/* Inline Ajax Action Feedback */}
+        {actionFeedback && (
+          <div
+            role="status"
+            className={`mt-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border px-4 py-3 text-sm font-semibold ${
+              actionFeedback.type === "success"
+                ? "border-emerald-500/40 bg-emerald-50 text-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100"
+                : "border-destructive/40 bg-destructive/10 text-destructive"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {actionFeedback.type === "success" ? (
+                <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
+              ) : (
+                <XCircle className="size-4 shrink-0" />
+              )}
+              <span>{actionFeedback.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionFeedback(null)}
+              className="text-xs underline opacity-80 hover:opacity-100"
+            >
+              بستن
+            </button>
+          </div>
+        )}
+
         {/* TAB: MEMBERSHIP REQUESTS */}
         {tab === "requests" && (
           <div className="mt-6 grid gap-4">
-            {requests.length === 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant={requestFilter === "all" ? "default" : "outline"}
+                onClick={() => setRequestFilter("all")}
+              >
+                همه درخواست‌ها ({faNumber(requestList.length)})
+              </Button>
+              <Button
+                size="sm"
+                variant={requestFilter === "pending" ? "default" : "outline"}
+                onClick={() => setRequestFilter("pending")}
+              >
+                در انتظار بررسی ({faNumber(pendingRequestCount)})
+              </Button>
+              <Button
+                size="sm"
+                variant={requestFilter === "approved" ? "default" : "outline"}
+                onClick={() => setRequestFilter("approved")}
+              >
+                تأییدشده ({faNumber(approvedRequestCount)})
+              </Button>
+              <Button
+                size="sm"
+                variant={requestFilter === "rejected" ? "default" : "outline"}
+                onClick={() => setRequestFilter("rejected")}
+              >
+                ردشده ({faNumber(rejectedRequestCount)})
+              </Button>
+            </div>
+
+            {filteredRequests.length === 0 ? (
               <p className="rounded-xl border border-border bg-card p-8 text-center text-sm text-muted-foreground">
-                درخواست عضویت در انتظاری وجود ندارد.
+                {requestFilter === "pending"
+                  ? "درخواست عضویت در انتظاری وجود ندارد."
+                  : requestFilter === "approved"
+                    ? "هنوز درخواستی تأیید نشده است."
+                    : requestFilter === "rejected"
+                      ? "درخواست ردشده‌ای وجود ندارد."
+                      : "درخواست عضویتی برای نمایش وجود ندارد."}
               </p>
             ) : (
-              requests.map((req) => (
-                <div key={req.id} className="rounded-xl border border-border bg-card p-5 shadow-xs">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <strong className="text-base">{req.member_name || "کاربر بدون نام"}</strong>
-                      <span className="rounded-lg bg-secondary px-2.5 py-1 text-xs font-bold">
-                        {roleLabels[req.role_code] || req.role_code}
+              filteredRequests.map((req) => {
+                const isApproved = req.approval_status === "approved";
+                const isRejected = req.approval_status === "rejected";
+                const isBusy = busyId === req.id;
+
+                return (
+                  <div
+                    key={req.id}
+                    className={`rounded-xl border p-5 shadow-xs transition-colors ${
+                      isApproved
+                        ? "border-emerald-500/50 bg-emerald-50/40 dark:bg-emerald-950/15"
+                        : isRejected
+                          ? "border-destructive/40 bg-destructive/5"
+                          : "border-border bg-card"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <strong className="text-base">{req.member_name || "کاربر بدون نام"}</strong>
+                        <span className="rounded-lg bg-secondary px-2.5 py-1 text-xs font-bold">
+                          {roleLabels[req.role_code] || req.role_code}
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-bold ${
+                            isApproved
+                              ? "bg-emerald-600 text-white"
+                              : isRejected
+                                ? "bg-destructive text-destructive-foreground"
+                                : "bg-amber-500/15 text-amber-800 dark:text-amber-200"
+                          }`}
+                        >
+                          {isApproved && <CheckCircle2 className="size-3.5" />}
+                          {isRejected && <XCircle className="size-3.5" />}
+                          {approvalStatusLabels[req.approval_status] || req.approval_status}
+                        </span>
+                      </div>
+                      <span className="font-mono text-xs text-muted-foreground" dir="ltr">
+                        {req.member_phone || req.member_email || "—"}
                       </span>
                     </div>
-                    <span className="font-mono text-xs text-muted-foreground" dir="ltr">
-                      {req.member_phone || "—"}
-                    </span>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      شهر: {req.member_city || req.member_province || "ثبت‌نشده"} · تاریخ ثبت:{" "}
+                      {new Date(req.created_at).toLocaleString("fa-IR")}
+                      {isApproved && req.approved_at
+                        ? ` · زمان تأیید: ${new Date(req.approved_at).toLocaleString("fa-IR")}`
+                        : ""}
+                    </p>
+                    {req.request_note && (
+                      <p className="mt-3 rounded-lg bg-muted/50 p-3 text-xs leading-6">{req.request_note}</p>
+                    )}
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {!isApproved && (
+                        <Button
+                          size="sm"
+                          disabled={isBusy}
+                          onClick={() => void handleApproveRequest(req, "approved")}
+                        >
+                          <CheckCircle2 className="ml-1 size-4" />
+                          {isBusy ? "در حال ثبت تأیید…" : "تأیید و فعال‌سازی نقش"}
+                        </Button>
+                      )}
+                      {!isRejected && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={isBusy}
+                          onClick={() => void handleApproveRequest(req, "rejected")}
+                        >
+                          <XCircle className="ml-1 size-4" />
+                          {isBusy ? "در حال ثبت…" : "رد درخواست"}
+                        </Button>
+                      )}
+                    </div>
                   </div>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    شهر: {req.member_city || req.member_province || "ثبت‌نشده"} · تاریخ ثبت:{" "}
-                    {new Date(req.created_at).toLocaleString("fa-IR")}
-                  </p>
-                  {req.request_note && (
-                    <p className="mt-3 rounded-lg bg-muted/50 p-3 text-xs leading-6">{req.request_note}</p>
-                  )}
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    <Button
-                      size="sm"
-                      disabled={busyId === req.id}
-                      onClick={() => void handleApproveRequest(req, "approved")}
-                    >
-                      <CheckCircle2 className="ml-1 size-4" />
-                      تأیید و فعال‌سازی نقش
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={busyId === req.id}
-                      onClick={() => void handleApproveRequest(req, "rejected")}
-                    >
-                      <XCircle className="ml-1 size-4" />
-                      رد درخواست
-                    </Button>
-                  </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         )}

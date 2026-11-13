@@ -2302,29 +2302,68 @@ export async function updateRoleApprovalStatus(
   try {
     await initD1Schema();
     const db = getD1();
-    const targetRole = await db
-      .prepare("SELECT mr.*, m.phone, m.email, m.full_name FROM member_roles mr LEFT JOIN members m ON mr.member_id = m.id WHERE mr.id = ? OR mr.member_id = ? LIMIT 1")
-      .bind(roleId, roleId)
-      .first<any>();
+    const targetRole = await runWithSchemaRepair(() =>
+      db
+        .prepare(
+          "SELECT mr.*, m.phone, m.email, m.full_name, m.role as member_role FROM member_roles mr LEFT JOIN members m ON mr.member_id = m.id WHERE mr.id = ? OR mr.member_id = ? LIMIT 1",
+        )
+        .bind(roleId, roleId)
+        .first<any>(),
+    );
 
-    const res = await db
-      .prepare(
-        "UPDATE member_roles SET approval_status = ?, approved_at = CURRENT_TIMESTAMP, approved_by = ? WHERE id = ? OR member_id = ?",
-      )
-      .bind(status, actorUserId, roleId, roleId)
-      .run();
+    let updated = false;
+    if (targetRole) {
+      const res = await runWithSchemaRepair(() =>
+        db
+          .prepare(
+            "UPDATE member_roles SET approval_status = ?, approved_at = CURRENT_TIMESTAMP, approved_by = ? WHERE id = ? OR member_id = ?",
+          )
+          .bind(status, actorUserId, roleId, roleId)
+          .run(),
+      );
+      updated = Boolean(res.success);
+    } else {
+      const orphanMember = await db
+        .prepare("SELECT * FROM members WHERE id = ? LIMIT 1")
+        .bind(roleId)
+        .first<any>();
+      if (orphanMember) {
+        const res = await runWithSchemaRepair(() =>
+          db
+            .prepare(
+              "INSERT INTO member_roles (id, member_id, role_code, approval_status, request_note, approved_at, approved_by, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)",
+            )
+            .bind(
+              generateId("role"),
+              orphanMember.id,
+              orphanMember.role || "buyer",
+              status,
+              orphanMember.products || "درخواست عضویت",
+              actorUserId,
+            )
+            .run(),
+        );
+        updated = Boolean(res.success);
+      }
+    }
 
     const memberId = targetRole?.member_id || roleId;
     if (status === "approved") {
-      await db
-        .prepare("UPDATE members SET verification_status = 'approved', is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .bind(memberId)
-        .run();
+      await runWithSchemaRepair(() =>
+        db
+          .prepare(
+            "UPDATE members SET verification_status = 'approved', is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          )
+          .bind(memberId)
+          .run(),
+      );
     } else {
-      await db
-        .prepare("UPDATE members SET verification_status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .bind(memberId)
-        .run();
+      await runWithSchemaRepair(() =>
+        db
+          .prepare("UPDATE members SET verification_status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .bind(memberId)
+          .run(),
+      );
     }
 
     await recordAuditLog({
@@ -2337,18 +2376,22 @@ export async function updateRoleApprovalStatus(
     });
 
     if (targetRole?.phone) {
-      void sendEventNotificationSms({
-        mobile: targetRole.phone,
-        eventType: status === "approved" ? "role_approved" : "role_rejected",
-        messageText:
-          status === "approved"
-            ? `ترابار: عضویت و دسترسی ${targetRole.role_code} برای حساب ${targetRole.full_name} تأیید و فعال شد.`
-            : `ترابار: درخواست ارتقای نقش ${targetRole.role_code} تأیید نشد. جزئیات را در حساب کاربری ببینید.`,
-        relatedId: memberId,
+      Promise.resolve(
+        sendEventNotificationSms({
+          mobile: targetRole.phone,
+          eventType: status === "approved" ? "role_approved" : "role_rejected",
+          messageText:
+            status === "approved"
+              ? `ترابار: عضویت و دسترسی ${targetRole.role_code} برای حساب ${targetRole.full_name} تأیید و فعال شد.`
+              : `ترابار: درخواست ارتقای نقش ${targetRole.role_code} تأیید نشد. جزئیات را در حساب کاربری ببینید.`,
+          relatedId: memberId,
+        }),
+      ).catch((smsErr) => {
+        console.warn("[d1] role approval sms error:", smsErr);
       });
     }
 
-    return !!res.success;
+    return updated;
   } catch (err) {
     console.error("[d1] updateRoleApprovalStatus error:", err);
     return false;
@@ -3772,6 +3815,16 @@ export async function getAdminDashboardData(): Promise<any> {
   await initD1Schema();
   const db = getD1();
 
+  const safeAll = async <T = any>(sql: string): Promise<{ results: T[] }> => {
+    try {
+      const res = await db.prepare(sql).all<T>();
+      return { results: res?.results || [] };
+    } catch (err) {
+      console.warn("[d1] getAdminDashboardData query fallback:", sql.slice(0, 60), err);
+      return { results: [] };
+    }
+  };
+
   const [
     membersRes,
     roleRequestsRes,
@@ -3789,34 +3842,54 @@ export async function getAdminDashboardData(): Promise<any> {
     auditLogsRes,
     neighborsRes,
   ] = await Promise.all([
-    db.prepare("SELECT * FROM members ORDER BY created_at DESC").all<any>(),
-    db.prepare(`
-      SELECT mr.*, m.full_name as member_name, m.phone as member_phone, m.city as member_city, m.province as member_province
+    safeAll("SELECT * FROM members ORDER BY created_at DESC"),
+    safeAll(`
+      SELECT mr.*, m.full_name as member_name, m.phone as member_phone, m.email as member_email, m.city as member_city, m.province as member_province
       FROM member_roles mr LEFT JOIN members m ON mr.member_id = m.id
       ORDER BY mr.created_at DESC
-    `).all<any>(),
-    getAllLoadsFromDatabase({ mode: "all" }),
-    getOrdersFromDatabase(),
-    getPurchaseRequests(),
-    db.prepare("SELECT * FROM ratings ORDER BY created_at DESC").all<any>(),
-    db.prepare("SELECT v.*, m.full_name, m.phone, m.city FROM site_visits v LEFT JOIN members m ON v.member_id = m.id OR v.user_id = m.auth_user_id ORDER BY v.created_at DESC LIMIT 100").all<any>(),
-    db.prepare("SELECT b.*, m.full_name as member_name, m.phone as member_phone FROM seller_bank_accounts b LEFT JOIN members m ON b.member_id = m.id ORDER BY b.updated_at DESC").all<any>(),
-    db.prepare("SELECT f.*, m.full_name as member_name FROM seller_financial_transactions f LEFT JOIN members m ON f.member_id = m.id ORDER BY f.transaction_date DESC").all<any>(),
-    db.prepare("SELECT * FROM platform_financial_ledger ORDER BY created_at DESC").all<any>(),
-    db.prepare("SELECT * FROM admin_users ORDER BY created_at DESC").all<any>(),
-    db.prepare("SELECT * FROM admin_user_cities ORDER BY created_at DESC").all<any>(),
-    db.prepare("SELECT * FROM sms_logs ORDER BY created_at DESC LIMIT 200").all<any>(),
-    db.prepare("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200").all<any>(),
-    db.prepare("SELECT * FROM city_neighbors ORDER BY city_name ASC").all<any>(),
+    `),
+    getAllLoadsFromDatabase({ mode: "all" }).catch(() => []),
+    getOrdersFromDatabase().catch(() => []),
+    getPurchaseRequests().catch(() => []),
+    safeAll("SELECT * FROM ratings ORDER BY created_at DESC"),
+    safeAll("SELECT v.*, m.full_name, m.phone, m.city FROM site_visits v LEFT JOIN members m ON v.member_id = m.id OR v.user_id = m.auth_user_id ORDER BY v.created_at DESC LIMIT 100"),
+    safeAll("SELECT b.*, m.full_name as member_name, m.phone as member_phone FROM seller_bank_accounts b LEFT JOIN members m ON b.member_id = m.id ORDER BY b.updated_at DESC"),
+    safeAll("SELECT f.*, m.full_name as member_name FROM seller_financial_transactions f LEFT JOIN members m ON f.member_id = m.id ORDER BY f.transaction_date DESC"),
+    safeAll("SELECT * FROM platform_financial_ledger ORDER BY created_at DESC"),
+    safeAll("SELECT * FROM admin_users ORDER BY created_at DESC"),
+    safeAll("SELECT * FROM admin_user_cities ORDER BY created_at DESC"),
+    safeAll("SELECT * FROM sms_logs ORDER BY created_at DESC LIMIT 200"),
+    safeAll("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200"),
+    safeAll("SELECT * FROM city_neighbors ORDER BY city_name ASC"),
   ]);
 
   const members = membersRes.results || [];
-  const roles = roleRequestsRes.results || [];
+  const roles = [...(roleRequestsRes.results || [])];
   const rolesByMember = new Map<string, any[]>();
   for (const r of roles) {
     const key = String(r.member_id);
     if (!rolesByMember.has(key)) rolesByMember.set(key, []);
     rolesByMember.get(key)!.push(r);
+  }
+
+  for (const m of members) {
+    if (m.verification_status === "pending" && !rolesByMember.has(String(m.id))) {
+      const synthetic = {
+        id: m.id,
+        member_id: m.id,
+        role_code: m.role || "buyer",
+        approval_status: "pending",
+        request_note: m.products || "درخواست عضویت در انتظار بررسی",
+        created_at: m.created_at || m.joined_at || new Date().toISOString(),
+        member_name: m.full_name,
+        member_phone: m.phone,
+        member_email: m.email,
+        member_city: m.city,
+        member_province: m.province,
+      };
+      roles.unshift(synthetic);
+      rolesByMember.set(String(m.id), [synthetic]);
+    }
   }
 
   const enrichedMembers = members.map((m) => ({
