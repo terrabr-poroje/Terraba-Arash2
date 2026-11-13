@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { z } from "zod";
 import { setRuntimeEnv } from "./runtime-env";
-import { sendOtpSms, verifyOtpCode } from "./sms-service";
+import { sendOtpSms, verifyOtpCode, normalizeIranMobile, toAsciiDigits } from "./sms-service";
 import { sendOtpEmail, verifyEmailOtpCode } from "./email-service";
 import {
   setCloudflareD1Binding,
@@ -16,6 +16,7 @@ import {
   authenticateAdmin,
   setAdminPassword,
   getAdminPhoneForOtp,
+  getAdminRecoveryEmail,
   getPendingRoleRequests,
   updateRoleApprovalStatus,
   submitMembershipRequest,
@@ -1145,13 +1146,75 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
     const rl = await checkRateLimit(`admin_otp:${clientIp}`, 5, 15 * 60 * 1000);
     if (!rl.allowed) return jsonResponse({ success: false, message: "تعداد درخواست کد زیاد است." }, 429);
 
+    const rawBody = (await request.json().catch(() => ({}))) as {
+      method?: "sms" | "email";
+      identifier?: string;
+    };
+    const requestedMethod = rawBody?.method === "email" ? "email" : "sms";
+    const typedIdentifier = typeof rawBody?.identifier === "string" ? rawBody.identifier.trim() : "";
+
+    if (requestedMethod === "email") {
+      const adminEmail = getAdminRecoveryEmail();
+      if (!adminEmail) {
+        return jsonResponse(
+          {
+            success: false,
+            message:
+              "ایمیل بازیابی مدیر (ADMIN_RECOVERY_EMAIL) در تنظیمات متغیرهای محیطی کلودفلر تعریف نشده است.",
+          },
+          400,
+        );
+      }
+
+      if (typedIdentifier && typedIdentifier.toLowerCase() !== adminEmail.toLowerCase()) {
+        return jsonResponse(
+          {
+            success: false,
+            message: "نشانی ایمیل واردشده با ایمیل بازیابی مدیر کل مطابقت ندارد.",
+          },
+          400,
+        );
+      }
+
+      const emailRes = await sendOtpEmail(adminEmail, "reset_password");
+      const parts = adminEmail.split("@");
+      const maskedEmail = (parts[0]?.slice(0, 3) || "") + "***@" + (parts[1] || "");
+      return jsonResponse(
+        {
+          success: emailRes.success,
+          method: "email",
+          target: maskedEmail,
+          message: emailRes.success
+            ? `کد تأیید ۶ رقمی به ایمیل بازیابی مدیر (${maskedEmail}) ارسال شد.`
+            : emailRes.message,
+        },
+        emailRes.success ? 200 : 400,
+      );
+    }
+
     const adminPhone = getAdminPhoneForOtp();
+    if (typedIdentifier) {
+      const cleanTyped = normalizeIranMobile(toAsciiDigits(typedIdentifier));
+      if (cleanTyped !== adminPhone) {
+        return jsonResponse(
+          {
+            success: false,
+            message: "شماره تماس واردشده با شماره مدیر کل مطابقت ندارد.",
+          },
+          400,
+        );
+      }
+    }
+
     const smsResult = await sendOtpSms(adminPhone, "admin_password_otp");
+    const maskedPhone = adminPhone.length >= 8 ? adminPhone.slice(0, 4) + "***" + adminPhone.slice(-4) : adminPhone;
     return jsonResponse(
       {
         success: smsResult.success,
+        method: "sms",
+        target: maskedPhone,
         message: smsResult.success
-          ? `کد تأیید ۶ رقمی به شماره ثبت‌شده مدیر کل ارسال شد.`
+          ? `کد تأیید ۶ رقمی به شماره ثبت‌شده مدیر کل (${maskedPhone}) ارسال شد.`
           : smsResult.message,
       },
       smsResult.success ? 200 : 400,
@@ -1162,14 +1225,38 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
     const parsed = await parseJson(
       request,
       z.object({
-        otpCode: z.string().length(6, "کد تأیید باید ۶ رقم باشد"),
+        otpCode: z.string().min(5, "کد تأیید باید ۶ رقم باشد").max(6, "کد تأیید باید ۶ رقم باشد"),
         newPassword: z.string().min(8, "رمز عبور جدید مدیر باید حداقل ۸ کاراکتر باشد"),
+        method: z.enum(["sms", "email"]).optional(),
       }),
     );
     if (parsed.error || !parsed.data) return jsonResponse({ success: false, message: parsed.error }, 400);
 
+    const cleanOtp = toAsciiDigits(parsed.data.otpCode).trim();
     const adminPhone = getAdminPhoneForOtp();
-    const verifyRes = await verifyOtpCode(adminPhone, parsed.data.otpCode);
+    const adminEmail = getAdminRecoveryEmail();
+
+    let verifyRes: { success: boolean; message: string };
+    if (parsed.data.method === "email") {
+      if (!adminEmail) {
+        return jsonResponse(
+          {
+            success: false,
+            message: "ایمیل بازیابی مدیر (ADMIN_RECOVERY_EMAIL) در تنظیمات کلودفلر تعریف نشده است.",
+          },
+          400,
+        );
+      }
+      verifyRes = await verifyEmailOtpCode(adminEmail, cleanOtp);
+    } else if (parsed.data.method === "sms") {
+      verifyRes = await verifyOtpCode(adminPhone, cleanOtp);
+    } else {
+      verifyRes = await verifyOtpCode(adminPhone, cleanOtp);
+      if (!verifyRes.success && adminEmail) {
+        verifyRes = await verifyEmailOtpCode(adminEmail, cleanOtp);
+      }
+    }
+
     if (!verifyRes.success) return jsonResponse({ success: false, message: verifyRes.message }, 400);
 
     await setAdminPassword(parsed.data.newPassword);
@@ -1179,6 +1266,7 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
       action: "admin_password_changed",
       targetType: "admin_settings",
       targetId: "admin_password",
+      details: `تغییر رمز مدیر کل از طریق ${parsed.data.method === "email" ? "ایمیل" : "پیامک"}`,
     });
 
     return jsonResponse({

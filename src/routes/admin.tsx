@@ -13,6 +13,7 @@ import {
   KeyRound,
   Landmark,
   Lock,
+  Mail,
   MapPinned,
   MessageSquare,
   Package,
@@ -382,6 +383,7 @@ function AdminPage() {
   const [financeBusy, setFinanceBusy] = useState(false);
 
   // Admin password change state
+  const [securityMethod, setSecurityMethod] = useState<"sms" | "email">("sms");
   const [securityOtpSent, setSecurityOtpSent] = useState(false);
   const [securityOtpCode, setSecurityOtpCode] = useState("");
   const [securityNewPassword, setSecurityNewPassword] = useState("");
@@ -749,17 +751,27 @@ function AdminPage() {
     }
   }
 
-  async function handleSendAdminOtp() {
+  async function handleSendAdminOtp(methodOverride?: "sms" | "email") {
+    const activeMethod = methodOverride || securityMethod;
+    setSecurityMethod(activeMethod);
     setSecurityBusy(true);
     setSecurityError("");
     setSecurityNotice("");
-    const res = await apiPost("/api/admin/request-password-otp", {});
+    const res = await apiPost("/api/admin/request-password-otp", { method: activeMethod });
     setSecurityBusy(false);
     if (res.ok && res.data?.success) {
       setSecurityOtpSent(true);
-      setSecurityNotice(res.data.message || "کد تأیید ۶ رقمی به شماره مدیر کل پیامک شد.");
+      setSecurityNotice(
+        res.data.message ||
+          (activeMethod === "email"
+            ? "کد تأیید ۶ رقمی به ایمیل بازیابی مدیر کل ارسال شد."
+            : "کد تأیید ۶ رقمی به شماره مدیر کل پیامک شد."),
+      );
     } else {
-      setSecurityError(res.data?.message || "خطا در ارسال پیامک تأیید.");
+      setSecurityError(
+        res.data?.message ||
+          (activeMethod === "email" ? "خطا در ارسال کد تأیید به ایمیل." : "خطا در ارسال پیامک تأیید."),
+      );
     }
   }
 
@@ -768,7 +780,7 @@ function AdminPage() {
     setSecurityError("");
     setSecurityNotice("");
     if (securityOtpCode.length !== 6) {
-      setSecurityError("کد تأیید ۶ رقمی پیامک‌شده را وارد نمایید.");
+      setSecurityError("کد تأیید ۶ رقمی ارسال‌شده را وارد نمایید.");
       return;
     }
     if (securityNewPassword.length < 8) {
@@ -783,6 +795,7 @@ function AdminPage() {
     const res = await apiPost("/api/admin/change-password", {
       otpCode: securityOtpCode.trim(),
       newPassword: securityNewPassword.trim(),
+      method: securityMethod,
     });
     setSecurityBusy(false);
     if (res.ok && res.data?.success) {
@@ -2262,7 +2275,7 @@ function AdminPage() {
                 <div>
                   <h2 className="text-xl font-bold">امنیت و تغییر رمز عبور مدیر کل</h2>
                   <p className="mt-0.5 text-xs text-muted-foreground">
-                    تغییر رمز فقط پس از تأیید کد پیامکی ۶ رقمی به شماره ثبت‌شده مدیر کل انجام می‌شود.
+                    تغییر رمز با تأیید کد ۶ رقمی به شماره تماس یا ایمیل بازیابی مدیر کل انجام می‌شود.
                   </p>
                 </div>
               </div>
@@ -2279,10 +2292,23 @@ function AdminPage() {
               )}
 
               {!securityOtpSent ? (
-                <div className="mt-6">
-                  <Button type="button" onClick={handleSendAdminOtp} disabled={securityBusy}>
+                <div className="mt-6 flex flex-wrap gap-3">
+                  <Button type="button" onClick={() => void handleSendAdminOtp("sms")} disabled={securityBusy}>
                     <Phone className="ml-2 size-4" />
-                    {securityBusy ? "در حال ارسال پیامک…" : "ارسال کد تأیید پیامک برای تغییر رمز"}
+                    {securityBusy && securityMethod === "sms"
+                      ? "در حال ارسال پیامک…"
+                      : "ارسال کد تأیید پیامکی"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void handleSendAdminOtp("email")}
+                    disabled={securityBusy}
+                  >
+                    <Mail className="ml-2 size-4" />
+                    {securityBusy && securityMethod === "email"
+                      ? "در حال ارسال ایمیل…"
+                      : "ارسال کد به ایمیل بازیابی مدیر"}
                   </Button>
                 </div>
               ) : (
@@ -2333,7 +2359,7 @@ function AdminPage() {
                       type="button"
                       variant="outline"
                       disabled={securityBusy}
-                      onClick={handleSendAdminOtp}
+                      onClick={() => void handleSendAdminOtp()}
                     >
                       ارسال مجدد کد
                     </Button>

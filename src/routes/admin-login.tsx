@@ -11,7 +11,7 @@ export const Route = createFileRoute("/admin-login")({
 
 function AdminLoginPage() {
   const navigate = useNavigate();
-  const [username, setUsername] = useState("Rahavard");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -27,16 +27,7 @@ function AdminLoginPage() {
     const cleanPassword = password.trim();
 
     if (!cleanUsername || !cleanPassword) {
-      setError("نام کاربری و رمز عبور را وارد کنید.");
-      setBusy(false);
-      return;
-    }
-
-    if (
-      cleanUsername.toLowerCase() !== "rahavard" &&
-      cleanUsername.toLowerCase() !== "admin"
-    ) {
-      setError("نام کاربری مدیر نامعتبر است. نام کاربری مدیر باید Rahavard باشد.");
+      setError("نام کاربری (یا ایمیل/شماره مدیر) و رمز عبور را وارد کنید.");
       setBusy(false);
       return;
     }
@@ -62,14 +53,14 @@ function AdminLoginPage() {
           token: data.sessionToken,
           user: data.user,
           member: data.member,
-          roles: data.roles || ["admin", "buyer", "seller", "supplier"],
+          roles: data.roles || ["admin", "main_admin", "buyer", "seller", "supplier"],
         };
         localStorage.setItem("terrabar_d1_session", JSON.stringify(sessionData));
         document.cookie = `tb_session=${data.sessionToken}; Path=/; Max-Age=2592000; SameSite=Lax`;
         window.dispatchEvent(new CustomEvent("terrabar-auth-change", { detail: sessionData }));
         setNotice("ورود مدیر با موفقیت تأیید شد؛ در حال انتقال به پنل مدیریت…");
         setBusy(false);
-        window.setTimeout(() => navigate({ to: "/admin" }), 400);
+        window.setTimeout(() => navigate({ to: "/admin" }), 300);
         return;
       }
     } catch {
@@ -96,15 +87,15 @@ function AdminLoginPage() {
           </div>
           <form onSubmit={submit} className="grid gap-4">
             <label className="field-label">
-              نام کاربری مدیر
+              نام کاربری، ایمیل یا شماره تماس مدیر
               <input
                 required
                 autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="field-input font-mono"
-                dir="ltr"
-                placeholder="Rahavard"
+                className="field-input"
+                dir="auto"
+                placeholder="Rahavard یا ایمیل / شماره تماس"
               />
             </label>
             <label className="field-label">
@@ -136,7 +127,12 @@ function AdminLoginPage() {
               <KeyRound className="mr-2 size-4" />
             </Button>
           </form>
-          <div className="mt-5 flex justify-between text-sm">
+          <div className="mt-4 text-center">
+            <Link to="/admin-reset-password" className="text-xs font-medium text-primary underline">
+              فراموشی یا تنظیم رمز مدیر (با ایمیل یا پیامک)
+            </Link>
+          </div>
+          <div className="mt-4 flex justify-between border-t border-border pt-4 text-sm">
             <Link to="/auth" className="text-primary underline">
               ورود کاربران
             </Link>

@@ -207,11 +207,24 @@ function generateId(prefix: string): string {
 // ==========================================
 
 export function getAdminPhoneForOtp(): string {
-  return getEnvVar("ADMIN_PHONE_FOR_OTP", "09124653082");
+  const raw = getEnvVar("ADMIN_PHONE_FOR_OTP") || getEnvVar("ADMIN_PHONE") || "09124653082";
+  return normalizeIranMobile(raw) || raw.trim();
 }
 
 export function getAdminUsername(): string {
-  return getEnvVar("ADMIN_USERNAME", "Rahavard");
+  return (getEnvVar("ADMIN_USERNAME") || getEnvVar("ADMIN_NAME") || "Rahavard").trim() || "Rahavard";
+}
+
+export function getAdminDisplayName(): string {
+  return (
+    getEnvVar("ADMIN_DISPLAY_NAME") ||
+    getEnvVar("ADMIN_NAME") ||
+    "مدیر کل ترابار"
+  ).trim() || "مدیر کل ترابار";
+}
+
+export function getAdminRecoveryEmail(): string {
+  return (getEnvVar("ADMIN_RECOVERY_EMAIL") || getEnvVar("ADMIN_EMAIL") || "").trim().toLowerCase();
 }
 
 export async function initD1Schema(): Promise<void> {
@@ -853,38 +866,8 @@ export async function initD1Schema(): Promise<void> {
       // Ignore
     }
 
-    // Seed main admin profile cleanly WITHOUT hardcoding passwords in code
-    try {
-      const envAdminPass = getEnvVar("ADMIN_DEFAULT_PASSWORD");
-      const hashedAdminPass = envAdminPass ? hashPassword(envAdminPass) : null;
-
-      await db
-        .prepare(
-          `INSERT OR IGNORE INTO users (id, phone, email, password_hash, full_name, role, city, province, is_verified, created_at, updated_at)
-           VALUES ('admin_user_main', ?, 'admin@terrabar.ir', ?, 'مدیر کل ترابار', 'admin', 'تهران', 'تهران', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        )
-        .bind(getAdminPhoneForOtp(), hashedAdminPass)
-        .run();
-
-      await db
-        .prepare(
-          `INSERT OR IGNORE INTO admin_users (id, auth_user_id, display_name, login_username, city, admin_role, is_active, created_at)
-           VALUES ('adm_main', 'admin_user_main', 'مدیر کل ترابار', ?, 'تهران', 'main_admin', 1, CURRENT_TIMESTAMP)`,
-        )
-        .bind(getAdminUsername())
-        .run();
-
-      if (hashedAdminPass) {
-        await db
-          .prepare(
-            "INSERT OR IGNORE INTO admin_settings (key, value, updated_at) VALUES ('admin_password', ?, CURRENT_TIMESTAMP)",
-          )
-          .bind(hashedAdminPass)
-          .run();
-      }
-    } catch {
-      // Ignore
-    }
+    // Seed & sync main admin profile cleanly WITHOUT hardcoding passwords in code
+    await syncMainAdminFromEnv(db);
 
     if (cloudflareD1Binding) {
       schemaInitDoneForD1 = true;
@@ -1211,34 +1194,54 @@ export interface UserAuthResult {
   sessionToken: string;
 }
 
-async function resolveUserRolesAndAdmin(userId: string, memberId?: string): Promise<string[]> {
+async function resolveUserRolesAndAdmin(
+  userId: string,
+  memberId?: string,
+  userRole?: string,
+): Promise<string[]> {
   const db = getD1();
   const roles: string[] = ["buyer"];
 
-  if (memberId) {
-    const roleRows = await db
-      .prepare("SELECT role_code, approval_status FROM member_roles WHERE member_id = ?")
-      .bind(memberId)
-      .all<{ role_code: string; approval_status: string }>();
+  const lowerUserRole = String(userRole || "").toLowerCase();
+  if (userId === "admin_user_main" || lowerUserRole === "admin" || lowerUserRole === "main_admin") {
+    if (!roles.includes("admin")) roles.push("admin");
+    if (!roles.includes("main_admin")) roles.push("main_admin");
+  } else if (lowerUserRole === "city_manager") {
+    if (!roles.includes("city_manager")) roles.push("city_manager");
+  }
 
-    for (const r of roleRows.results || []) {
-      const code = String(r.role_code || "").toLowerCase();
-      if (String(r.approval_status || "").toLowerCase() === "approved") {
-        const normalized = code === "bar_seller" ? "seller" : code;
-        if (!roles.includes(normalized)) roles.push(normalized);
-        if (code === "bar_seller" && !roles.includes("bar_seller")) roles.push("bar_seller");
+  if (memberId) {
+    try {
+      const roleRows = await db
+        .prepare("SELECT role_code, approval_status FROM member_roles WHERE member_id = ?")
+        .bind(memberId)
+        .all<{ role_code: string; approval_status: string }>();
+
+      for (const r of roleRows.results || []) {
+        const code = String(r.role_code || "").toLowerCase();
+        if (String(r.approval_status || "").toLowerCase() === "approved") {
+          const normalized = code === "bar_seller" ? "seller" : code;
+          if (!roles.includes(normalized)) roles.push(normalized);
+          if (code === "bar_seller" && !roles.includes("bar_seller")) roles.push("bar_seller");
+        }
       }
+    } catch {
+      // Ignore role table read failure
     }
   }
 
-  const admin = await db
-    .prepare("SELECT admin_role FROM admin_users WHERE auth_user_id = ? AND is_active = 1 LIMIT 1")
-    .bind(userId)
-    .first<{ admin_role: string }>();
+  try {
+    const admin = await db
+      .prepare("SELECT admin_role FROM admin_users WHERE auth_user_id = ? AND is_active = 1 LIMIT 1")
+      .bind(userId)
+      .first<{ admin_role: string }>();
 
-  if (admin) {
-    if (!roles.includes("admin")) roles.push("admin");
-    if (admin.admin_role && !roles.includes(admin.admin_role)) roles.push(admin.admin_role);
+    if (admin) {
+      if (!roles.includes("admin")) roles.push("admin");
+      if (admin.admin_role && !roles.includes(admin.admin_role)) roles.push(admin.admin_role);
+    }
+  } catch {
+    // Ignore admin_users read failure
   }
 
   return roles;
@@ -1647,14 +1650,19 @@ async function saveSessionRecord(
   } catch {
     try {
       await db
+        .prepare(
+          "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT, token TEXT UNIQUE, phone TEXT, email TEXT, expires_at INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+        )
+        .run();
+      await db
         .prepare("ALTER TABLE sessions ADD COLUMN email TEXT")
         .run()
         .catch(() => {});
       await db
         .prepare(
-          "INSERT INTO sessions (id, user_id, token, phone, expires_at, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+          "INSERT INTO sessions (id, user_id, token, phone, email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
         )
-        .bind(record.id, record.userId, record.token, record.phone, record.expiresAt)
+        .bind(record.id, record.userId, record.token, record.phone, record.email, record.expiresAt)
         .run();
     } catch (err) {
       console.warn("[d1] saveSessionRecord failed:", err);
@@ -1686,17 +1694,42 @@ export async function validateD1Session(sessionToken: string): Promise<UserAuthR
     return null;
   }
 
-  const user = await db
+  let user = await db
     .prepare("SELECT * FROM users WHERE id = ? LIMIT 1")
     .bind(session.user_id)
     .first<any>();
 
   if (!user) {
-    const cached = sessionCache.get(sessionToken);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.result;
+    if (session.user_id === "admin_user_main") {
+      await syncMainAdminFromEnv(db);
+      user = await db
+        .prepare("SELECT * FROM users WHERE id = 'admin_user_main' LIMIT 1")
+        .first<any>();
     }
-    return null;
+    if (!user) {
+      const adminRow = await db
+        .prepare("SELECT * FROM admin_users WHERE auth_user_id = ? AND is_active = 1 LIMIT 1")
+        .bind(session.user_id)
+        .first<any>();
+      if (adminRow || session.user_id === "admin_user_main") {
+        user = {
+          id: session.user_id,
+          phone: session.phone || getAdminPhoneForOtp(),
+          email: session.email || getAdminRecoveryEmail() || "admin@terrabar.ir",
+          full_name: adminRow?.display_name || getAdminDisplayName(),
+          role: adminRow?.admin_role === "city_manager" ? "city_manager" : "admin",
+          city: adminRow?.city || "تهران",
+          province: "تهران",
+          activity: "",
+        };
+      } else {
+        const cached = sessionCache.get(sessionToken);
+        if (cached && cached.expiresAt > Date.now()) {
+          return cached.result;
+        }
+        return null;
+      }
+    }
   }
 
   const member = await db
@@ -1704,7 +1737,7 @@ export async function validateD1Session(sessionToken: string): Promise<UserAuthR
     .bind(user.id)
     .first<any>();
 
-  const roles = await resolveUserRolesAndAdmin(user.id, member?.id);
+  const roles = await resolveUserRolesAndAdmin(user.id, member?.id, user.role);
 
   const authResult: UserAuthResult = {
     user: {
@@ -1798,38 +1831,175 @@ export async function updateUserProfile(
 // Admin Authentication & Password Management
 // ==========================================
 
+function sha256Hex(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+export async function syncMainAdminFromEnv(dbArg?: D1Database): Promise<void> {
+  const db = dbArg || getD1();
+  try {
+    const envPhone = getEnvVar("ADMIN_PHONE_FOR_OTP") || getEnvVar("ADMIN_PHONE");
+    const envEmail = getAdminRecoveryEmail();
+    const envDisplayName = getEnvVar("ADMIN_DISPLAY_NAME") || getEnvVar("ADMIN_NAME");
+    const envUsername = getAdminUsername();
+    const envAdminPass = getEnvVar("ADMIN_DEFAULT_PASSWORD");
+
+    const phone = getAdminPhoneForOtp();
+    const email = envEmail || "admin@terrabar.ir";
+    const displayName = getAdminDisplayName();
+
+    const existingUser = await db
+      .prepare("SELECT id, phone, email, full_name, password_hash FROM users WHERE id = 'admin_user_main' LIMIT 1")
+      .first<any>();
+    const existingAdmin = await db
+      .prepare("SELECT id, login_username, display_name, password_hash FROM admin_users WHERE auth_user_id = 'admin_user_main' LIMIT 1")
+      .first<any>();
+    const settingPass = await db
+      .prepare("SELECT value FROM admin_settings WHERE key = 'admin_password' LIMIT 1")
+      .first<{ value: string }>();
+    const envDigestSetting = await db
+      .prepare("SELECT value FROM admin_settings WHERE key = 'admin_default_pw_digest' LIMIT 1")
+      .first<{ value: string }>();
+    const pwSourceSetting = await db
+      .prepare("SELECT value FROM admin_settings WHERE key = 'admin_password_source' LIMIT 1")
+      .first<{ value: string }>();
+
+    const currentEnvDigest = envAdminPass ? sha256Hex(envAdminPass) : "";
+    const envPasswordChanged = Boolean(envAdminPass && envDigestSetting?.value !== currentEnvDigest);
+    const hasAnyStoredPassword = Boolean(existingUser?.password_hash || existingAdmin?.password_hash || settingPass?.value);
+    const shouldApplyEnvPassword = Boolean(
+      envAdminPass &&
+        (!hasAnyStoredPassword ||
+          (envPasswordChanged && (Boolean(envDigestSetting?.value) || pwSourceSetting?.value !== "otp"))),
+    );
+    const hashedAdminPass = shouldApplyEnvPassword ? hashPassword(envAdminPass) : null;
+
+    if (!existingUser) {
+      await runWithSchemaRepair(() =>
+        db
+          .prepare(
+            `INSERT INTO users (id, phone, email, password_hash, full_name, role, city, province, is_verified, created_at, updated_at)
+             VALUES ('admin_user_main', ?, ?, ?, ?, 'admin', 'تهران', 'تهران', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          )
+          .bind(phone, email, hashedAdminPass, displayName)
+          .run(),
+      );
+    } else {
+      const nextPhone = envPhone ? phone : existingUser.phone || phone;
+      const nextEmail = envEmail || existingUser.email || "admin@terrabar.ir";
+      const nextName = envDisplayName ? displayName : existingUser.full_name || displayName;
+      const nextHash = hashedAdminPass || existingUser.password_hash || settingPass?.value || null;
+      await db
+        .prepare(
+          `UPDATE users SET phone = ?, email = ?, full_name = ?, password_hash = COALESCE(?, password_hash), role = 'admin', is_verified = 1, updated_at = CURRENT_TIMESTAMP
+           WHERE id = 'admin_user_main'`,
+        )
+        .bind(nextPhone, nextEmail, nextName, nextHash)
+        .run();
+    }
+
+    if (!existingAdmin) {
+      await runWithSchemaRepair(() =>
+        db
+          .prepare(
+            `INSERT INTO admin_users (id, auth_user_id, display_name, login_username, city, password_hash, admin_role, is_active, created_at)
+             VALUES ('adm_main', 'admin_user_main', ?, ?, 'تهران', ?, 'main_admin', 1, CURRENT_TIMESTAMP)`,
+          )
+          .bind(displayName, envUsername, hashedAdminPass || settingPass?.value || null)
+          .run(),
+      );
+    } else {
+      const nextAdminName = envDisplayName ? displayName : existingAdmin.display_name || displayName;
+      await db
+        .prepare(
+          `UPDATE admin_users SET display_name = ?, login_username = ?, password_hash = COALESCE(?, password_hash), admin_role = 'main_admin', is_active = 1
+           WHERE auth_user_id = 'admin_user_main'`,
+        )
+        .bind(nextAdminName, envUsername, hashedAdminPass || null)
+        .run();
+    }
+
+    if (hashedAdminPass) {
+      await db
+        .prepare(
+          "INSERT INTO admin_settings (key, value, updated_at) VALUES ('admin_password', ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(hashedAdminPass)
+        .run();
+      if (currentEnvDigest) {
+        await db
+          .prepare(
+            "INSERT INTO admin_settings (key, value, updated_at) VALUES ('admin_default_pw_digest', ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+          )
+          .bind(currentEnvDigest)
+          .run();
+      }
+    }
+  } catch (err) {
+    console.warn("[d1] syncMainAdminFromEnv error:", err);
+  }
+}
+
 export async function authenticateAdmin(
   username: string,
   password: string,
 ): Promise<{ success: boolean; message: string; result?: UserAuthResult }> {
   await initD1Schema();
   const db = getD1();
-  const cleanUser = (username || "").trim();
-  const cleanPass = (password || "").trim();
-  const expectedUsername = getAdminUsername();
+  await syncMainAdminFromEnv(db);
 
-  // Check either main admin username or city manager in admin_users
+  const cleanUser = toAsciiDigits((username || "").trim());
+  const cleanUserLower = cleanUser.toLowerCase();
+  const normalizedPhoneInput = normalizeIranMobile(cleanUser);
+  const cleanPass = (password || "").trim();
+
+  const expectedUsername = getAdminUsername();
+  const expectedDisplayName = getAdminDisplayName();
+  const expectedEmail = getAdminRecoveryEmail();
+  const expectedPhone = getAdminPhoneForOtp();
+
   let adminRow: any = null;
   let userRow: any = null;
 
-  if (
-    cleanUser.toLowerCase() === expectedUsername.toLowerCase() ||
-    cleanUser.toLowerCase() === "admin"
-  ) {
+  const isMainAdminIdentifier =
+    cleanUserLower === expectedUsername.toLowerCase() ||
+    cleanUserLower === "admin" ||
+    cleanUserLower === "rahavard" ||
+    (expectedDisplayName && cleanUserLower === expectedDisplayName.toLowerCase()) ||
+    (expectedEmail && cleanUserLower === expectedEmail) ||
+    (expectedPhone && normalizedPhoneInput === expectedPhone);
+
+  if (isMainAdminIdentifier) {
     userRow = await db.prepare("SELECT * FROM users WHERE id = 'admin_user_main' LIMIT 1").first<any>();
     adminRow = await db.prepare("SELECT * FROM admin_users WHERE auth_user_id = 'admin_user_main' AND is_active = 1 LIMIT 1").first<any>();
   } else {
     adminRow = await db
-      .prepare("SELECT * FROM admin_users WHERE LOWER(login_username) = ? AND is_active = 1 LIMIT 1")
-      .bind(cleanUser.toLowerCase())
+      .prepare("SELECT * FROM admin_users WHERE (LOWER(login_username) = ? OR LOWER(display_name) = ?) AND is_active = 1 LIMIT 1")
+      .bind(cleanUserLower, cleanUserLower)
       .first<any>();
-    if (adminRow?.auth_user_id) {
+    if (!adminRow) {
+      const matchedUser = await db
+        .prepare("SELECT * FROM users WHERE LOWER(email) = ? OR phone = ? LIMIT 1")
+        .bind(cleanUserLower, normalizedPhoneInput)
+        .first<any>();
+      if (matchedUser) {
+        const linkedAdmin = await db
+          .prepare("SELECT * FROM admin_users WHERE auth_user_id = ? AND is_active = 1 LIMIT 1")
+          .bind(matchedUser.id)
+          .first<any>();
+        if (linkedAdmin) {
+          adminRow = linkedAdmin;
+          userRow = matchedUser;
+        }
+      }
+    }
+    if (adminRow?.auth_user_id && !userRow) {
       userRow = await db.prepare("SELECT * FROM users WHERE id = ? LIMIT 1").bind(adminRow.auth_user_id).first<any>();
     }
   }
 
   if (!adminRow && !userRow) {
-    return { success: false, message: "نام کاربری مدیر نادرست است." };
+    return { success: false, message: "نام کاربری، نام ادمین، ایمیل یا شماره تماس مدیر نادرست است." };
   }
 
   const settingRow = await db
@@ -1853,9 +2023,11 @@ export async function authenticateAdmin(
         await db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").bind(upgraded, userRow.id).run();
       }
     }
-  } else {
+  }
+
+  if (!verified && (adminRow?.id === "adm_main" || userRow?.id === "admin_user_main")) {
     const envPass = getEnvVar("ADMIN_DEFAULT_PASSWORD");
-    if (envPass && cleanPass === envPass) {
+    if (envPass && cleanPass === envPass && !storedHash) {
       verified = true;
       await setAdminPassword(cleanPass);
     }
@@ -1866,7 +2038,7 @@ export async function authenticateAdmin(
       success: false,
       message: storedHash
         ? "رمز عبور مدیر نادرست است."
-        : "رمز عبور مدیر هنوز تنظیم نشده است؛ از طریق OTP شماره مدیر کل تنظیم کنید یا ADMIN_DEFAULT_PASSWORD را در محیط تنظیم نمایید.",
+        : "رمز عبور مدیر هنوز تنظیم نشده است؛ از بخش بازیابی رمز مدیر اقدام کنید یا ADMIN_DEFAULT_PASSWORD را در تنظیمات کلودفلر وارد نمایید.",
     };
   }
 
@@ -1878,12 +2050,12 @@ export async function authenticateAdmin(
     id: generateId("sess"),
     userId: targetUserId,
     token,
-    phone: userRow?.phone || getAdminPhoneForOtp(),
-    email: userRow?.email || "admin@terrabar.ir",
+    phone: userRow?.phone || expectedPhone,
+    email: userRow?.email || expectedEmail || "admin@terrabar.ir",
     expiresAt,
   });
 
-  const roles = await resolveUserRolesAndAdmin(targetUserId);
+  const roles = await resolveUserRolesAndAdmin(targetUserId, undefined, userRow?.role || "admin");
   if (!roles.includes("admin")) roles.push("admin");
 
   await recordAuditLog({
@@ -1892,25 +2064,26 @@ export async function authenticateAdmin(
     action: "admin_login",
     targetType: "session",
     targetId: targetUserId,
-    details: `ورود مدیر با نام کاربری ${cleanUser}`,
+    details: `ورود مدیر با شناسه ${cleanUser}`,
   });
 
   const result: UserAuthResult = {
     user: {
       id: targetUserId,
-      phone: userRow?.phone || getAdminPhoneForOtp(),
-      full_name: userRow?.full_name || adminRow?.display_name || "مدیر ترابار",
-      role: "admin",
+      phone: userRow?.phone || expectedPhone,
+      full_name: userRow?.full_name || adminRow?.display_name || expectedDisplayName,
+      role: userRow?.role || (adminRow?.admin_role === "city_manager" ? "city_manager" : "admin"),
       city: userRow?.city || adminRow?.city || "تهران",
       province: userRow?.province || "تهران",
-      email: userRow?.email || "admin@terrabar.ir",
+      email: userRow?.email || expectedEmail || "admin@terrabar.ir",
     },
     member: {
       id: `mem_${targetUserId}`,
       auth_user_id: targetUserId,
-      full_name: userRow?.full_name || adminRow?.display_name || "مدیر ترابار",
-      phone: userRow?.phone || getAdminPhoneForOtp(),
-      role: "admin",
+      full_name: userRow?.full_name || adminRow?.display_name || expectedDisplayName,
+      phone: userRow?.phone || expectedPhone,
+      email: userRow?.email || expectedEmail || "admin@terrabar.ir",
+      role: userRow?.role || (adminRow?.admin_role === "city_manager" ? "city_manager" : "admin"),
       city: userRow?.city || adminRow?.city || "تهران",
       province: userRow?.province || "تهران",
     },
@@ -1937,6 +2110,12 @@ export async function setAdminPassword(newPassword: string): Promise<void> {
       "INSERT INTO admin_settings (key, value, updated_at) VALUES ('admin_password', ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
     )
     .bind(hashed)
+    .run();
+
+  await db
+    .prepare(
+      "INSERT INTO admin_settings (key, value, updated_at) VALUES ('admin_password_source', 'otp', CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+    )
     .run();
 
   await db
@@ -2393,15 +2572,41 @@ export async function resetUserPasswordWithOtp(params: {
   const passwordHash = hashPassword(newPass);
 
   if (isEmail) {
+    const matchedAdmin = await db
+      .prepare("SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1")
+      .bind(cleanId)
+      .first<{ id: string }>();
     await db
       .prepare("UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE LOWER(email) = ?")
       .bind(passwordHash, cleanId)
       .run();
+    if (matchedAdmin?.id === "admin_user_main" || cleanId === getAdminRecoveryEmail()) {
+      await setAdminPassword(newPass);
+    } else if (matchedAdmin?.id) {
+      await db
+        .prepare("UPDATE admin_users SET password_hash = ? WHERE auth_user_id = ?")
+        .bind(passwordHash, matchedAdmin.id)
+        .run()
+        .catch(() => {});
+    }
   } else {
+    const matchedAdmin = await db
+      .prepare("SELECT id FROM users WHERE phone = ? LIMIT 1")
+      .bind(cleanId)
+      .first<{ id: string }>();
     await db
       .prepare("UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE phone = ?")
       .bind(passwordHash, cleanId)
       .run();
+    if (matchedAdmin?.id === "admin_user_main" || cleanId === getAdminPhoneForOtp()) {
+      await setAdminPassword(newPass);
+    } else if (matchedAdmin?.id) {
+      await db
+        .prepare("UPDATE admin_users SET password_hash = ? WHERE auth_user_id = ?")
+        .bind(passwordHash, matchedAdmin.id)
+        .run()
+        .catch(() => {});
+    }
   }
 
   return {
