@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix 1 terraba",
+  "description": "یک صفحه خالی، تمیز و مینیمال برای تمرکز، یادداشت و نگارش بدون حواس‌پرتی",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

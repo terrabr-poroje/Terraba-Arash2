@@ -1,0 +1,119 @@
+# Deploy only the exact Terrabar release candidate after a clean build and route smoke tests.
+name: Deploy approved Terrabar production release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraba-arash-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-verify-deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the exact commit pushed to main
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Validate required deployment secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: "980efee43cd0c6512bb7ffce38e319c6"
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error::Missing Cloudflare API token secret (CLOUDFLARE_API_TOKEN)."
+            exit 1
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "::error::Missing Cloudflare account ID."
+            exit 1
+          fi
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build release candidate
+        run: bun run build:worker
+      - name: Configure and verify the existing production Worker
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const path = '.output/server/wrangler.json';
+          if (!fs.existsSync(path)) {
+            throw new Error('Refusing deployment: Cloudflare Worker build output is missing.');
+          }
+          const config = JSON.parse(fs.readFileSync(path, 'utf8'));
+          if (!config.main) {
+            throw new Error('Refusing deployment: generated Worker entry point is missing.');
+          }
+          const expectedWorker = 'terraba-arash';
+          if (Object.prototype.hasOwnProperty.call(config, 'routes')) {
+            throw new Error('Refusing deployment: routes must remain managed by the existing Cloudflare custom-domain configuration.');
+          }
+          if (config.assets?.binding !== 'ASSETS') {
+            throw new Error('Refusing deployment: expected ASSETS binding is missing.');
+          }
+          const d1 = (config.d1_databases || []).find(binding =>
+            binding.binding === 'DB' && binding.database_id === '9da7735b-e4c9-4f7f-9abe-53ba1545c60e'
+          );
+          if (!d1) {
+            throw new Error('Refusing deployment: existing Terrabar D1 binding does not match.');
+          }
+          config.name = expectedWorker;
+          config.keep_vars = true;
+          config.secrets = {
+            ...(config.secrets || {}),
+            required: [...new Set([...(config.secrets?.required || []), 'SMS_IR_API_KEY'])]
+          };
+          fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
+          const verified = JSON.parse(fs.readFileSync(path, 'utf8'));
+          if (verified.name !== expectedWorker || verified.keep_vars !== true) {
+            throw new Error('Refusing deployment: Worker target or keep-vars safeguard is incorrect.');
+          }
+          if (Object.prototype.hasOwnProperty.call(verified, 'routes')) {
+            throw new Error('Refusing deployment: generated config must not manage domain routes.');
+          }
+          if (!verified.secrets?.required?.includes('SMS_IR_API_KEY')) {
+            throw new Error('Refusing deployment: required SMS secret guard is missing.');
+          }
+          console.log('Verified target terraba-arash; retained ASSETS and D1 bindings; preserved dashboard vars; required existing SMS_IR_API_KEY; no routes will be changed.');
+          NODE
+
+      - name: Deploy to the existing production Worker
+        run: bunx wrangler deploy --config .output/server/wrangler.json
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: "980efee43cd0c6512bb7ffce38e319c6"
+
+      - name: Verify production routes return the Terrabar page
+        run: |
+          set -euo pipefail
+          for base in https://terrabar.ir https://www.terrabar.ir; do
+            for route in / /auth /announce /requests /cart /professional-purchase; do
+              result="$(curl --silent --show-error --output /tmp/terrabar-production.html --write-out '%{http_code} %{time_total}' --retry 5 --retry-delay 2 --retry-connrefused "${base}${route}")"
+              code="${result%% *}"
+              elapsed="${result##* }"
+              if [ "$code" != "200" ]; then
+                echo "::error::${base}${route} returned HTTP ${code} after ${elapsed}s"
+                head -c 500 /tmp/terrabar-production.html || true
+                exit 1
+              fi
+              echo "PASS ${base}${route}: HTTP 200, ${elapsed}s"
+              grep -q 'ترابار' /tmp/terrabar-production.html || {
+                echo "::error::${base}${route} response did not contain expected Terrabar page text."
+                exit 1
+              }
+            done
+          done
