@@ -1221,6 +1221,21 @@ async function resolveUserRolesAndAdmin(userId: string, memberId?: string): Prom
   return roles;
 }
 
+async function runWithSchemaRepair<T>(op: () => Promise<T>): Promise<T> {
+  try {
+    return await op();
+  } catch (err: any) {
+    const msg = String(err?.message || err || "").toLowerCase();
+    if (msg.includes("no column named") || msg.includes("no such column") || msg.includes("no such table")) {
+      schemaInitDoneForD1 = false;
+      schemaInitPromise = null;
+      await initD1Schema();
+      return await op();
+    }
+    throw err;
+  }
+}
+
 export async function registerOrLoginUserWithPhone(
   payload: UserRegistrationPayload,
 ): Promise<UserAuthResult> {
@@ -1264,13 +1279,15 @@ export async function registerOrLoginUserWithPhone(
     userEmail = `phone_${cleanPhone}@terrabar.ir`;
     const activity = payload.activity?.trim() || "";
 
-    await db
-      .prepare(
-        `INSERT INTO users (id, phone, email, full_name, role, city, province, activity, is_verified, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      )
-      .bind(userId, phone, userEmail, userFullName, userRole, userCity, userProvince, activity)
-      .run();
+    await runWithSchemaRepair(() =>
+      db
+        .prepare(
+          `INSERT INTO users (id, phone, email, full_name, role, city, province, activity, is_verified, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        )
+        .bind(userId, phone, userEmail, userFullName, userRole, userCity, userProvince, activity)
+        .run(),
+    );
   }
 
   const existingMember = await db
@@ -1290,24 +1307,26 @@ export async function registerOrLoginUserWithPhone(
     const initialVerification = isProfessionalSignup ? "pending" : "approved";
     memberId = generateId("mem");
 
-    await db
-      .prepare(
-        `INSERT INTO members (id, auth_user_id, full_name, phone, email, city, province, role, verification_status, products, is_active, is_archived, joined_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      )
-      .bind(
-        memberId,
-        userId,
-        userFullName,
-        phone,
-        userEmail,
-        userCity,
-        userProvince,
-        normalizedRole,
-        initialVerification,
-        payload.activity?.trim() || "",
-      )
-      .run();
+    await runWithSchemaRepair(() =>
+      db
+        .prepare(
+          `INSERT INTO members (id, auth_user_id, full_name, phone, email, city, province, role, verification_status, products, is_active, is_archived, joined_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        )
+        .bind(
+          memberId,
+          userId,
+          userFullName,
+          phone,
+          userEmail,
+          userCity,
+          userProvince,
+          normalizedRole,
+          initialVerification,
+          payload.activity?.trim() || "",
+        )
+        .run(),
+    );
 
     const approvalStatus = isProfessionalSignup ? "pending" : "approved";
     const roleTitle =
@@ -1319,20 +1338,22 @@ export async function registerOrLoginUserWithPhone(
     const regNote =
       payload.activity?.trim() || `ثبت‌نام جدید در ترابار با نقش ${roleTitle}`;
 
-    await db
-      .prepare(
-        `INSERT INTO member_roles (id, member_id, role_code, approval_status, request_note, approved_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-      )
-      .bind(
-        generateId("role"),
-        memberId,
-        normalizedRole,
-        approvalStatus,
-        regNote,
-        approvalStatus === "approved" ? new Date().toISOString() : null,
-      )
-      .run();
+    await runWithSchemaRepair(() =>
+      db
+        .prepare(
+          `INSERT INTO member_roles (id, member_id, role_code, approval_status, request_note, approved_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        )
+        .bind(
+          generateId("role"),
+          memberId,
+          normalizedRole,
+          approvalStatus,
+          regNote,
+          approvalStatus === "approved" ? new Date().toISOString() : null,
+        )
+        .run(),
+    );
 
     memberRecord = await db.prepare("SELECT * FROM members WHERE id = ? LIMIT 1").bind(memberId).first<any>();
   }
@@ -1453,23 +1474,25 @@ export async function registerOrLoginUserWithEmail(
       }
     }
 
-    await db
-      .prepare(
-        `INSERT INTO users (id, phone, email, password_hash, full_name, role, city, province, activity, is_verified, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      )
-      .bind(
-        userId,
-        userPhone,
-        email,
-        passwordHash,
-        userFullName,
-        userRole,
-        userCity,
-        userProvince,
-        activity,
-      )
-      .run();
+    await runWithSchemaRepair(() =>
+      db
+        .prepare(
+          `INSERT INTO users (id, phone, email, password_hash, full_name, role, city, province, activity, is_verified, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        )
+        .bind(
+          userId,
+          userPhone,
+          email,
+          passwordHash,
+          userFullName,
+          userRole,
+          userCity,
+          userProvince,
+          activity,
+        )
+        .run(),
+    );
   }
 
   const existingMember = await db
@@ -1489,24 +1512,26 @@ export async function registerOrLoginUserWithEmail(
     const initialVerification = isProfessionalSignup ? "pending" : "approved";
     memberId = generateId("mem");
 
-    await db
-      .prepare(
-        `INSERT INTO members (id, auth_user_id, full_name, phone, email, city, province, role, verification_status, products, is_active, is_archived, joined_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      )
-      .bind(
-        memberId,
-        userId,
-        userFullName,
-        userPhone,
-        email,
-        userCity,
-        userProvince,
-        normalizedRole,
-        initialVerification,
-        payload.activity?.trim() || "",
-      )
-      .run();
+    await runWithSchemaRepair(() =>
+      db
+        .prepare(
+          `INSERT INTO members (id, auth_user_id, full_name, phone, email, city, province, role, verification_status, products, is_active, is_archived, joined_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        )
+        .bind(
+          memberId,
+          userId,
+          userFullName,
+          userPhone,
+          email,
+          userCity,
+          userProvince,
+          normalizedRole,
+          initialVerification,
+          payload.activity?.trim() || "",
+        )
+        .run(),
+    );
 
     const approvalStatus = isProfessionalSignup ? "pending" : "approved";
     const roleTitle =
@@ -1518,20 +1543,22 @@ export async function registerOrLoginUserWithEmail(
     const regNote =
       payload.activity?.trim() || `ثبت‌نام جدید در ترابار با ایمیل (${roleTitle})`;
 
-    await db
-      .prepare(
-        `INSERT INTO member_roles (id, member_id, role_code, approval_status, request_note, approved_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-      )
-      .bind(
-        generateId("role"),
-        memberId,
-        normalizedRole,
-        approvalStatus,
-        regNote,
-        approvalStatus === "approved" ? new Date().toISOString() : null,
-      )
-      .run();
+    await runWithSchemaRepair(() =>
+      db
+        .prepare(
+          `INSERT INTO member_roles (id, member_id, role_code, approval_status, request_note, approved_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        )
+        .bind(
+          generateId("role"),
+          memberId,
+          normalizedRole,
+          approvalStatus,
+          regNote,
+          approvalStatus === "approved" ? new Date().toISOString() : null,
+        )
+        .run(),
+    );
 
     memberRecord = await db.prepare("SELECT * FROM members WHERE id = ? LIMIT 1").bind(memberId).first<any>();
   }
