@@ -19,7 +19,7 @@
   "overrides": {
     "rolldown": "1.2.1"
   },
-  "dependencies": {
+  "dependencies":{
     "@aws-sdk/client-s3": "^3.1163.0",
     "@hookform/resolvers": "^5.2.2",
     "@radix-ui/react-accordion": "^1.2.12",
