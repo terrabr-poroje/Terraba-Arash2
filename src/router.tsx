@@ -4,6 +4,7 @@ import { routeTree } from "./routeTree.gen";
 import { initBrowserPolyfills } from "./lib/browser-polyfills";
 
 // Initialize polyfills immediately on client
+// Initialize polyfills immediately on client
 if (typeof window !== "undefined") {
   initBrowserPolyfills();
 }
