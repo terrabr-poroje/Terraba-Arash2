@@ -118,12 +118,29 @@ export default {
 
       // Unified API router
       if (url.pathname.startsWith("/api/")) {
-        const resolvedEnv =
-          env ??
-          (request as any)?.runtime?.cloudflare?.env ??
-          (globalThis as any)?.__env__;
-        const apiResponse = await handleApiRequest(request, resolvedEnv);
-        if (apiResponse) return apiResponse;
+        try {
+          const resolvedEnv =
+            env ??
+            (request as any)?.runtime?.cloudflare?.env ??
+            (globalThis as any)?.__env__;
+          const apiResponse = await handleApiRequest(request, resolvedEnv);
+          if (apiResponse) return apiResponse;
+        } catch (apiError: any) {
+          console.error("[server API error]", apiError);
+          return new Response(
+            JSON.stringify({
+              success: false,
+              message: apiError?.message || "خطای داخلی سرور در پردازش درخواست",
+            }),
+            {
+              status: 500,
+              headers: {
+                "content-type": "application/json; charset=utf-8",
+                "cache-control": "no-store, no-cache, must-revalidate",
+              },
+            },
+          );
+        }
       }
 
       const handler = await getServerEntry();

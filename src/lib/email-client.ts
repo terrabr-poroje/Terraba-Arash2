@@ -24,6 +24,22 @@ export interface VerifyEmailOtpResponse {
   sessionToken?: string;
 }
 
+function createTimeoutSignal(ms: number): { signal?: AbortSignal; cleanup: () => void } {
+  if (typeof AbortController === "undefined") {
+    return { cleanup: () => {} };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return {
+    signal: controller.signal,
+    cleanup: () => clearTimeout(timer),
+  };
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
 /**
  * Requests a 6-digit OTP code to be sent to the user's email via Resend
  */
@@ -31,12 +47,13 @@ export async function requestEmailOtp(
   email: string,
   purpose: "signup" | "login" | "reset_password" = "signup"
 ): Promise<{ success: boolean; message: string }> {
+  const timeout = createTimeoutSignal(20000);
   try {
     const res = await fetch("/api/email/send-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, purpose }),
-      signal: AbortSignal.timeout(8000),
+      signal: timeout.signal,
     });
     const data = (await res.json().catch(() => ({}))) as { success?: boolean; message?: string };
     return {
@@ -47,8 +64,12 @@ export async function requestEmailOtp(
     console.error("[requestEmailOtp error]", err);
     return {
       success: false,
-      message: "خطا در اتصال به سرور جهت ارسال کد به ایمیل. لطفاً اتصال اینترنت خود را بررسی کنید.",
+      message: isAbortError(err)
+        ? "پاسخ‌گویی سرور ایمیل طولانی شد. لطفاً چند لحظه بعد دوباره تلاش کنید."
+        : "خطا در برقراری ارتباط با سرور ایمیل. لطفاً دوباره تلاش کنید.",
     };
+  } finally {
+    timeout.cleanup();
   }
 }
 
@@ -58,12 +79,13 @@ export async function requestEmailOtp(
 export async function submitVerifyEmailOtp(
   params: VerifyEmailOtpParams
 ): Promise<VerifyEmailOtpResponse> {
+  const timeout = createTimeoutSignal(20000);
   try {
     const res = await fetch("/api/email/verify-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params),
-      signal: AbortSignal.timeout(12000),
+      signal: timeout.signal,
     });
     const data = (await res.json().catch(() => ({}))) as VerifyEmailOtpResponse;
 
@@ -91,8 +113,12 @@ export async function submitVerifyEmailOtp(
     console.error("[submitVerifyEmailOtp error]", err);
     return {
       success: false,
-      message: "خطا در برقراری ارتباط با سرور برای تأیید کد و ورود.",
+      message: isAbortError(err)
+        ? "پاسخ‌گویی سرور طولانی شد. لطفاً دوباره تلاش کنید."
+        : "خطا در برقراری ارتباط با سرور برای تأیید کد و ورود.",
     };
+  } finally {
+    timeout.cleanup();
   }
 }
 
@@ -103,12 +129,13 @@ export async function requestPasswordReset(
   identifier: string,
   preferredMethod?: "sms" | "email"
 ): Promise<{ success: boolean; message: string; deliveryMethod?: string; target?: string }> {
+  const timeout = createTimeoutSignal(20000);
   try {
     const res = await fetch("/api/auth/send-password-reset-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ identifier, preferredMethod }),
-      signal: AbortSignal.timeout(10000),
+      signal: timeout.signal,
     });
     const data = (await res.json().catch(() => ({}))) as {
       success?: boolean;
@@ -128,6 +155,8 @@ export async function requestPasswordReset(
       success: false,
       message: "خطا در اتصال به سرور جهت درخواست بازیابی رمز عبور.",
     };
+  } finally {
+    timeout.cleanup();
   }
 }
 
@@ -139,12 +168,13 @@ export async function submitResetPasswordWithOtp(params: {
   code: string;
   newPassword: string;
 }): Promise<{ success: boolean; message: string }> {
+  const timeout = createTimeoutSignal(20000);
   try {
     const res = await fetch("/api/auth/reset-password-with-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params),
-      signal: AbortSignal.timeout(12000),
+      signal: timeout.signal,
     });
     const data = (await res.json().catch(() => ({}))) as { success?: boolean; message?: string };
     return {
@@ -157,5 +187,7 @@ export async function submitResetPasswordWithOtp(params: {
       success: false,
       message: "خطا در ارتباط با سرور جهت تغییر رمز عبور.",
     };
+  } finally {
+    timeout.cleanup();
   }
 }

@@ -551,14 +551,18 @@ export async function initD1Schema(): Promise<void> {
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
 
-    for (const stmt of statements) {
-      try {
-        await db.exec(stmt + ";");
-      } catch {
+    try {
+      await db.batch(statements.map((stmt) => db.prepare(stmt)));
+    } catch {
+      for (const stmt of statements) {
         try {
-          await db.prepare(stmt).run();
+          await db.exec(stmt + ";");
         } catch {
-          // Ignore if exists
+          try {
+            await db.prepare(stmt).run();
+          } catch {
+            // Ignore if exists
+          }
         }
       }
     }
@@ -735,29 +739,45 @@ export async function initD1Schema(): Promise<void> {
       },
     };
 
-    for (const [tableName, expectedCols] of Object.entries(requiredColumnsByTable)) {
-      let existingCols: Set<string> | null = null;
-      try {
-        const info = await db.prepare(`PRAGMA table_info('${tableName}')`).all<{ name: string }>();
-        if (Array.isArray(info?.results) && info.results.length > 0) {
-          existingCols = new Set(info.results.map((r) => String(r.name || "").toLowerCase()));
+    const tableEntries = Object.entries(requiredColumnsByTable);
+    const pragmaResults = await Promise.all(
+      tableEntries.map(async ([tableName]) => {
+        try {
+          const info = await db.prepare(`PRAGMA table_info('${tableName}')`).all<{ name: string }>();
+          if (Array.isArray(info?.results) && info.results.length > 0) {
+            return new Set(info.results.map((r) => String(r.name || "").toLowerCase()));
+          }
+        } catch {
+          // Fallback to direct ALTER statements
         }
-      } catch {
-        // Fallback to direct ALTER statements
-      }
+        return null;
+      }),
+    );
 
+    const alterStatements: string[] = [];
+    tableEntries.forEach(([tableName, expectedCols], idx) => {
+      const existingCols = pragmaResults[idx];
       for (const [colName, colDef] of Object.entries(expectedCols)) {
         if (existingCols && existingCols.has(colName.toLowerCase())) {
           continue;
         }
-        const alterSql = `ALTER TABLE ${tableName} ADD COLUMN ${colName} ${colDef}`;
-        try {
-          await db.prepare(alterSql).run();
-        } catch {
+        alterStatements.push(`ALTER TABLE ${tableName} ADD COLUMN ${colName} ${colDef}`);
+      }
+    });
+
+    if (alterStatements.length > 0) {
+      try {
+        await db.batch(alterStatements.map((s) => db.prepare(s)));
+      } catch {
+        for (const alterSql of alterStatements) {
           try {
-            await db.exec(alterSql + ";");
+            await db.prepare(alterSql).run();
           } catch {
-            // Ignore if column already exists
+            try {
+              await db.exec(alterSql + ";");
+            } catch {
+              // Ignore if column already exists
+            }
           }
         }
       }
@@ -771,26 +791,28 @@ export async function initD1Schema(): Promise<void> {
       "CREATE INDEX IF NOT EXISTS idx_carts_user ON carts(user_id)",
     ];
 
-    for (const idxStmt of indexStatements) {
-      try {
-        await db.prepare(idxStmt).run();
-      } catch {
+    try {
+      await db.batch(indexStatements.map((idxStmt) => db.prepare(idxStmt)));
+    } catch {
+      for (const idxStmt of indexStatements) {
         try {
-          await db.exec(idxStmt + ";");
+          await db.prepare(idxStmt).run();
         } catch {
-          // Ignore if index exists
+          try {
+            await db.exec(idxStmt + ";");
+          } catch {
+            // Ignore if index exists
+          }
         }
       }
     }
 
     // Initialize sequential counters
     try {
-      await db
-        .prepare("INSERT OR IGNORE INTO invoice_sequences (seq_name, current_value) VALUES ('order_invoice', 1000)")
-        .run();
-      await db
-        .prepare("INSERT OR IGNORE INTO invoice_sequences (seq_name, current_value) VALUES ('purchase_request', 100)")
-        .run();
+      await db.batch([
+        db.prepare("INSERT OR IGNORE INTO invoice_sequences (seq_name, current_value) VALUES ('order_invoice', 1000)"),
+        db.prepare("INSERT OR IGNORE INTO invoice_sequences (seq_name, current_value) VALUES ('purchase_request', 100)"),
+      ]);
     } catch {
       // Ignore
     }
@@ -819,12 +841,13 @@ export async function initD1Schema(): Promise<void> {
           ["ساری", "بابل"],
           ["قم", "ساوه"],
         ];
-        for (const [c1, c2] of pairs) {
-          await db
-            .prepare("INSERT INTO city_neighbors (id, city_name, neighbor_city_name, is_enabled) VALUES (?, ?, ?, 1)")
-            .bind(generateId("cn"), c1, c2)
-            .run();
-        }
+        await db.batch(
+          pairs.map(([c1, c2]) =>
+            db
+              .prepare("INSERT INTO city_neighbors (id, city_name, neighbor_city_name, is_enabled) VALUES (?, ?, ?, 1)")
+              .bind(generateId("cn"), c1, c2),
+          ),
+        );
       }
     } catch {
       // Ignore

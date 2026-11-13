@@ -39,13 +39,15 @@ export interface VerifyOtpResponse {
 }
 
 export async function requestSmsOtp(mobile: string): Promise<{ success: boolean; message: string }> {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 15000) : null;
   try {
     const res = await fetch("/api/sms/send-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mobile }),
       keepalive: true,
-      signal: AbortSignal.timeout(6000),
+      signal: controller?.signal,
     });
     const data = (await res.json().catch(() => ({}))) as { success?: boolean; message?: string };
     return {
@@ -56,8 +58,13 @@ export async function requestSmsOtp(mobile: string): Promise<{ success: boolean;
     console.error("[requestSmsOtp error]", err);
     return {
       success: false,
-      message: "خطا در اتصال به سرور جهت ارسال پیامک. لطفاً اتصال اینترنت خود را بررسی کنید.",
+      message:
+        err instanceof Error && err.name === "AbortError"
+          ? "پاسخ‌گویی سرور پیامک طولانی شد. لطفاً دوباره تلاش کنید."
+          : "خطا در اتصال به سرور جهت ارسال پیامک. لطفاً دوباره تلاش کنید.",
     };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

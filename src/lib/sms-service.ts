@@ -86,6 +86,8 @@ async function sendToSmsIrVerify(
     };
   }
 
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 10000) : null;
   try {
     const payload = {
       mobile,
@@ -105,7 +107,7 @@ async function sendToSmsIrVerify(
         Accept: "application/json",
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(5000),
+      signal: controller?.signal,
     });
 
     const result = (await response.json().catch(() => ({}))) as {
@@ -127,12 +129,14 @@ async function sendToSmsIrVerify(
       message: result.message,
     };
   } catch (err: unknown) {
-    const isTimeout = err instanceof Error && err.name === "TimeoutError";
+    const isTimeout = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
     const errorMsg = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
       message: isTimeout ? "مهلت زمانی ارتباط با سرویس پیامک به پایان رسید." : errorMsg,
     };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -307,6 +311,8 @@ export async function sendEventNotificationSms(params: {
     return { ok: false, error: errMsg };
   }
 
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 10000) : null;
   try {
     const response = await fetch("https://api.sms.ir/v1/send/bulk", {
       method: "POST",
@@ -320,7 +326,7 @@ export async function sendEventNotificationSms(params: {
         messageText: params.messageText,
         mobiles: [mobile],
       }),
-      signal: AbortSignal.timeout(5000),
+      signal: controller?.signal,
     });
 
     const result = (await response.json().catch(() => ({}))) as {
@@ -354,5 +360,7 @@ export async function sendEventNotificationSms(params: {
       relatedId: params.relatedId,
     });
     return { ok: false, error: errMsg };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }

@@ -107,6 +107,8 @@ export async function sendEmailViaResend(params: {
     };
   }
 
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 10000) : null;
   try {
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -121,7 +123,7 @@ export async function sendEmailViaResend(params: {
         html: params.html,
         text: params.text || params.subject,
       }),
-      signal: AbortSignal.timeout(6000),
+      signal: controller?.signal,
     });
 
     const data = (await response.json().catch(() => ({}))) as {
@@ -139,8 +141,15 @@ export async function sendEmailViaResend(params: {
       error: data?.message || `خطای سرویس ایمیل با وضعیت ${response.status}`,
     };
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    const isTimeout = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
+    const message = isTimeout
+      ? "مهلت زمانی ارتباط با سرویس ایمیل (Resend) به پایان رسید."
+      : err instanceof Error
+        ? err.message
+        : String(err);
     return { ok: false, error: message };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -194,15 +203,19 @@ export async function sendOtpEmail(
     text: `${subtitle}\nکد تأیید شما: ${code}\nاین کد به مدت ۱۰ دقیقه معتبر است.`,
   });
 
-  await globalForEmailHook.__terrabar_email_hook__?.logMessage?.({
-    recipient: email,
-    channel: "email",
-    eventType: `email_otp_${purpose}`,
-    messageSummary: subtitle,
-    status: resendResult.ok ? "sent" : "failed",
-    providerStatus: resendResult.status ? String(resendResult.status) : undefined,
-    errorMessage: resendResult.ok ? undefined : resendResult.error,
-  });
+  try {
+    await globalForEmailHook.__terrabar_email_hook__?.logMessage?.({
+      recipient: email,
+      channel: "email",
+      eventType: `email_otp_${purpose}`,
+      messageSummary: subtitle,
+      status: resendResult.ok ? "sent" : "failed",
+      providerStatus: resendResult.status ? String(resendResult.status) : undefined,
+      errorMessage: resendResult.ok ? undefined : resendResult.error,
+    });
+  } catch (logErr) {
+    console.warn("[email-service] logMessage error:", logErr);
+  }
 
   if (!resendResult.ok) {
     return {
