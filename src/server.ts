@@ -118,7 +118,11 @@ export default {
 
       // Unified API router
       if (url.pathname.startsWith("/api/")) {
-        const apiResponse = await handleApiRequest(request, env);
+        const resolvedEnv =
+          env ??
+          (request as any)?.runtime?.cloudflare?.env ??
+          (globalThis as any)?.__env__;
+        const apiResponse = await handleApiRequest(request, resolvedEnv);
         if (apiResponse) return apiResponse;
       }
 

@@ -52,11 +52,13 @@ export interface D1Database {
 
 let cloudflareD1Binding: D1Database | null = null;
 let schemaInitPromise: Promise<void> | null = null;
+let schemaInitDoneForD1 = false;
 
 export function setCloudflareD1Binding(db: any) {
   if (db && typeof db.prepare === "function") {
-    if (cloudflareD1Binding !== db) {
-      cloudflareD1Binding = db;
+    const hadBinding = Boolean(cloudflareD1Binding);
+    cloudflareD1Binding = db;
+    if (!hadBinding && !schemaInitDoneForD1) {
       schemaInitPromise = null;
     }
   }
@@ -146,6 +148,11 @@ function getLocalSqlite(): D1Database {
 
 export function getD1(): D1Database {
   if (cloudflareD1Binding) return cloudflareD1Binding;
+  const globalDb = (globalThis as any)?.__env__?.DB;
+  if (globalDb && typeof globalDb.prepare === "function") {
+    setCloudflareD1Binding(globalDb);
+    return globalDb;
+  }
   return getLocalSqlite();
 }
 
@@ -607,7 +614,11 @@ export async function initD1Schema(): Promise<void> {
       try {
         await db.exec(alt);
       } catch {
-        // Ignore if column/index already exists
+        try {
+          await db.prepare(alt.replace(/;\s*$/, "")).run();
+        } catch {
+          // Ignore if column/index already exists
+        }
       }
     }
 
@@ -690,7 +701,14 @@ export async function initD1Schema(): Promise<void> {
     } catch {
       // Ignore
     }
-  })();
+
+    if (cloudflareD1Binding) {
+      schemaInitDoneForD1 = true;
+    }
+  })().catch((err) => {
+    schemaInitPromise = null;
+    throw err;
+  });
 
   return schemaInitPromise;
 }
@@ -1162,14 +1180,16 @@ export async function registerOrLoginUserWithPhone(
   const sessionToken = generateSecureToken("tbsess");
   const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
 
-  await db
-    .prepare(
-      "INSERT INTO sessions (id, user_id, token, phone, email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-    )
-    .bind(generateId("sess"), userId, sessionToken, phone, userEmail, expiresAt)
-    .run();
+  await saveSessionRecord(db, {
+    id: generateId("sess"),
+    userId,
+    token: sessionToken,
+    phone,
+    email: userEmail,
+    expiresAt,
+  });
 
-  return {
+  const authResult: UserAuthResult = {
     user: {
       id: userId,
       phone,
@@ -1184,6 +1204,9 @@ export async function registerOrLoginUserWithPhone(
     roles: assignedRoles,
     sessionToken,
   };
+  cacheSessionResult(sessionToken, authResult, expiresAt);
+
+  return authResult;
 }
 
 export interface EmailAuthPayload {
@@ -1356,14 +1379,16 @@ export async function registerOrLoginUserWithEmail(
   const sessionToken = generateSecureToken("tbsess");
   const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
 
-  await db
-    .prepare(
-      "INSERT INTO sessions (id, user_id, token, phone, email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-    )
-    .bind(generateId("sess"), userId, sessionToken, userPhone, email, expiresAt)
-    .run();
+  await saveSessionRecord(db, {
+    id: generateId("sess"),
+    userId,
+    token: sessionToken,
+    phone: userPhone,
+    email,
+    expiresAt,
+  });
 
-  return {
+  const authResult: UserAuthResult = {
     user: {
       id: userId,
       phone: userPhone,
@@ -1378,6 +1403,52 @@ export async function registerOrLoginUserWithEmail(
     roles: assignedRoles,
     sessionToken,
   };
+  cacheSessionResult(sessionToken, authResult, expiresAt);
+
+  return authResult;
+}
+
+const globalForSessions = globalThis as unknown as {
+  __terrabar_session_cache__?: Map<string, { result: UserAuthResult; expiresAt: number }>;
+};
+
+const sessionCache =
+  globalForSessions.__terrabar_session_cache__ ||
+  new Map<string, { result: UserAuthResult; expiresAt: number }>();
+globalForSessions.__terrabar_session_cache__ = sessionCache;
+
+function cacheSessionResult(token: string, result: UserAuthResult, expiresAt: number) {
+  if (!token) return;
+  sessionCache.set(token, { result, expiresAt });
+}
+
+async function saveSessionRecord(
+  db: D1Database,
+  record: { id: string; userId: string; token: string; phone: string | null; email: string | null; expiresAt: number },
+) {
+  try {
+    await db
+      .prepare(
+        "INSERT INTO sessions (id, user_id, token, phone, email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+      )
+      .bind(record.id, record.userId, record.token, record.phone, record.email, record.expiresAt)
+      .run();
+  } catch {
+    try {
+      await db
+        .prepare("ALTER TABLE sessions ADD COLUMN email TEXT")
+        .run()
+        .catch(() => {});
+      await db
+        .prepare(
+          "INSERT INTO sessions (id, user_id, token, phone, expires_at, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(record.id, record.userId, record.token, record.phone, record.expiresAt)
+        .run();
+    } catch (err) {
+      console.warn("[d1] saveSessionRecord failed:", err);
+    }
+  }
 }
 
 export async function validateD1Session(sessionToken: string): Promise<UserAuthResult | null> {
@@ -1385,19 +1456,37 @@ export async function validateD1Session(sessionToken: string): Promise<UserAuthR
   await initD1Schema();
   const db = getD1();
 
-  const session = await db
-    .prepare("SELECT * FROM sessions WHERE token = ? AND expires_at > ? LIMIT 1")
-    .bind(sessionToken, Date.now())
-    .first<any>();
+  let session: any = null;
+  try {
+    session = await db
+      .prepare("SELECT * FROM sessions WHERE token = ? AND expires_at > ? LIMIT 1")
+      .bind(sessionToken, Date.now())
+      .first<any>();
+  } catch (err) {
+    console.warn("[d1] validateD1Session sessions query failed:", err);
+  }
 
-  if (!session) return null;
+  if (!session) {
+    const cached = sessionCache.get(sessionToken);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.result;
+    }
+    sessionCache.delete(sessionToken);
+    return null;
+  }
 
   const user = await db
     .prepare("SELECT * FROM users WHERE id = ? LIMIT 1")
     .bind(session.user_id)
     .first<any>();
 
-  if (!user) return null;
+  if (!user) {
+    const cached = sessionCache.get(sessionToken);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.result;
+    }
+    return null;
+  }
 
   const member = await db
     .prepare("SELECT * FROM members WHERE auth_user_id = ? LIMIT 1")
@@ -1406,7 +1495,7 @@ export async function validateD1Session(sessionToken: string): Promise<UserAuthR
 
   const roles = await resolveUserRolesAndAdmin(user.id, member?.id);
 
-  return {
+  const authResult: UserAuthResult = {
     user: {
       id: user.id,
       phone: user.phone,
@@ -1432,10 +1521,13 @@ export async function validateD1Session(sessionToken: string): Promise<UserAuthR
     roles,
     sessionToken,
   };
+  cacheSessionResult(sessionToken, authResult, Number(session.expires_at) || Date.now() + 30 * 24 * 60 * 60 * 1000);
+  return authResult;
 }
 
 export async function invalidateD1Session(sessionToken: string): Promise<void> {
   if (!sessionToken) return;
+  sessionCache.delete(sessionToken);
   await initD1Schema();
   const db = getD1();
   await db.prepare("DELETE FROM sessions WHERE token = ?").bind(sessionToken).run();
@@ -1571,19 +1663,14 @@ export async function authenticateAdmin(
   const token = generateSecureToken("admsess");
   const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
 
-  await db
-    .prepare(
-      "INSERT INTO sessions (id, user_id, token, phone, email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-    )
-    .bind(
-      generateId("sess"),
-      targetUserId,
-      token,
-      userRow?.phone || getAdminPhoneForOtp(),
-      userRow?.email || "admin@terrabar.ir",
-      expiresAt,
-    )
-    .run();
+  await saveSessionRecord(db, {
+    id: generateId("sess"),
+    userId: targetUserId,
+    token,
+    phone: userRow?.phone || getAdminPhoneForOtp(),
+    email: userRow?.email || "admin@terrabar.ir",
+    expiresAt,
+  });
 
   const roles = await resolveUserRolesAndAdmin(targetUserId);
   if (!roles.includes("admin")) roles.push("admin");
@@ -1597,31 +1684,34 @@ export async function authenticateAdmin(
     details: `ورود مدیر با نام کاربری ${cleanUser}`,
   });
 
+  const result: UserAuthResult = {
+    user: {
+      id: targetUserId,
+      phone: userRow?.phone || getAdminPhoneForOtp(),
+      full_name: userRow?.full_name || adminRow?.display_name || "مدیر ترابار",
+      role: "admin",
+      city: userRow?.city || adminRow?.city || "تهران",
+      province: userRow?.province || "تهران",
+      email: userRow?.email || "admin@terrabar.ir",
+    },
+    member: {
+      id: `mem_${targetUserId}`,
+      auth_user_id: targetUserId,
+      full_name: userRow?.full_name || adminRow?.display_name || "مدیر ترابار",
+      phone: userRow?.phone || getAdminPhoneForOtp(),
+      role: "admin",
+      city: userRow?.city || adminRow?.city || "تهران",
+      province: userRow?.province || "تهران",
+    },
+    roles,
+    sessionToken: token,
+  };
+  cacheSessionResult(token, result, expiresAt);
+
   return {
     success: true,
     message: "ورود مدیر با موفقیت تأیید شد.",
-    result: {
-      user: {
-        id: targetUserId,
-        phone: userRow?.phone || getAdminPhoneForOtp(),
-        full_name: userRow?.full_name || adminRow?.display_name || "مدیر ترابار",
-        role: "admin",
-        city: userRow?.city || adminRow?.city || "تهران",
-        province: userRow?.province || "تهران",
-        email: userRow?.email || "admin@terrabar.ir",
-      },
-      member: {
-        id: `mem_${targetUserId}`,
-        auth_user_id: targetUserId,
-        full_name: userRow?.full_name || adminRow?.display_name || "مدیر ترابار",
-        phone: userRow?.phone || getAdminPhoneForOtp(),
-        role: "admin",
-        city: userRow?.city || adminRow?.city || "تهران",
-        province: userRow?.province || "تهران",
-      },
-      roles,
-      sessionToken: token,
-    },
+    result,
   };
 }
 

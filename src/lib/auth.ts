@@ -110,6 +110,7 @@ export function useAuth() {
         if (res.status === 401) {
           if (active) {
             localStorage.removeItem("terrabar_d1_session");
+            document.cookie = "tb_session=; Path=/; Max-Age=0; SameSite=Lax";
             applySession(null);
           }
           return;
@@ -120,9 +121,9 @@ export function useAuth() {
           return;
         }
 
-        const data = (await res.json().catch(() => ({}))) as { session?: any };
-        if (active) {
-          if (data?.session) {
+        const data = (await res.json().catch(() => null)) as { session?: any } | null;
+        if (active && data && typeof data === "object" && "session" in data) {
+          if (data.session) {
             const updatedSession: AppSession = {
               token: data.session.sessionToken || token,
               user: data.session.user,
@@ -133,6 +134,7 @@ export function useAuth() {
             applySession(updatedSession);
           } else {
             localStorage.removeItem("terrabar_d1_session");
+            document.cookie = "tb_session=; Path=/; Max-Age=0; SameSite=Lax";
             applySession(null);
           }
         }

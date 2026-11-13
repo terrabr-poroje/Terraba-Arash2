@@ -396,6 +396,7 @@ function AuthPage() {
             roles: data.roles,
           }),
         );
+        document.cookie = `tb_session=${data.sessionToken}; path=/; max-age=2592000; SameSite=Lax`;
 
         window.dispatchEvent(
           new CustomEvent("terrabar-auth-change", {

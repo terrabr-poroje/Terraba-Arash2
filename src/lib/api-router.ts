@@ -152,9 +152,13 @@ async function parseJson<T>(request: Request, schema: z.ZodType<T>): Promise<{ d
 }
 
 export async function handleApiRequest(request: Request, env?: any): Promise<Response | null> {
-  if (env) {
-    setRuntimeEnv(env);
-    if (env.DB) setCloudflareD1Binding(env.DB);
+  const resolvedEnv =
+    env ??
+    (request as any)?.runtime?.cloudflare?.env ??
+    (globalThis as any)?.__env__;
+  if (resolvedEnv) {
+    setRuntimeEnv(resolvedEnv);
+    if (resolvedEnv.DB) setCloudflareD1Binding(resolvedEnv.DB);
   }
 
   const url = new URL(request.url, "http://localhost:3000");

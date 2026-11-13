@@ -13,6 +13,10 @@ export function getEnvVar(key: string, fallback = ""): string {
   if (typeof fromWorker === "string" && fromWorker.length > 0) {
     return fromWorker;
   }
+  const fromGlobalEnv = (globalThis as any)?.__env__?.[key];
+  if (typeof fromGlobalEnv === "string" && fromGlobalEnv.length > 0) {
+    return fromGlobalEnv;
+  }
   if (typeof process !== "undefined" && process.env && typeof process.env[key] === "string") {
     return process.env[key] || fallback;
   }
