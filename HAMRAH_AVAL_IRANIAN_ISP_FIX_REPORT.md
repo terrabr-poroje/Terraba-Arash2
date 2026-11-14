@@ -59,6 +59,18 @@
 - ایجاد `public/sw.js` خودحذف‌شونده برای پاکسازی تمام `CacheStorage`های احتمالی قبلی در مرورگر کاربران و فراخوانی غیرمسدودکننده `unregisterServiceWorker()` پس از مانت شدن صفحه اصلی.
 - همگام‌سازی کامل هدرهای امنیتی و کش استاتیک در `public/_headers`.
 
+### و) استراتژی کش قوی فونت‌های لوکال و Preload در Safari (`__root.tsx`، `vite.config.ts`، `src/server.ts`)
+- **ذخیره ۱۰۰٪ لوکال فونت‌ها:** فونت متغیر `Vazirmatn-Variable.woff2` و وزن‌های استاتیک آن در مسیر محلی `/public/fonts/vazirmatn/` نگهداری می‌شوند و هیچ درخواست خارجی (مانند Google Fonts) در صفحه وجود ندارد.
+- **پیش‌بارگذاری (`preload`) در `<head>`:** تگ `<link rel="preload" as="font" type="font/woff2" href="/fonts/vazirmatn/Vazirmatn-Variable.woff2" crossorigin="anonymous" />` در ریشه HTML قرار گرفت تا Safari و WebKit پیش از تکمیل پردازش CSS، فایل فونت را به‌صورت همزمان دریافت کنند.
+- **هدرهای کش و دسترسی فونت:** در هر دو لایه `vite.config.ts` (dev/preview) و `src/server.ts` و `public/_headers` برای تمام فایل‌های `/fonts/*` (`.woff2`, `.woff`, `.ttf`, `.otf`) هدرهای زیر ست شدند:
+  - `Cache-Control: public, max-age=31536000, immutable`
+  - `Access-Control-Allow-Origin: *` (ضروری برای Preload در Safari)
+  - `Cross-Origin-Resource-Policy: cross-origin` و `Content-Type` دقیق فونت (`font/woff2`, `font/ttf` و ...)
+
+### ز) اصلاح سراسری CORS برای تمام APIها و لایه فشرده‌سازی Gzip / Brotli
+- **CORS یکپارچه روی تمام مسیرهای `/api/*`:** در `vite.config.ts`، `src/lib/api-router.ts` و `src/server.ts` تمامی پاسخ‌های API (موفق، خطا و `OPTIONS` پیش‌پرواز) دارای هدرهای `Access-Control-Allow-Origin: *`، `Access-Control-Allow-Methods`، `Access-Control-Allow-Headers` و `Vary: Origin, Accept-Encoding` هستند.
+- **فشرده‌سازی پاسخ سرور (Brotli / Gzip):** ماژول `src/lib/http-compression.ts` در لایه پاسخ `src/server.ts` و میدل‌ویر `vite.config.ts` پاسخ‌های متنی/JSON/HTML/JS/CSS/SVG بزرگ‌تر از ۵۱۲ بایت را بر اساس هدر `Accept-Encoding` مرورگر با الگوریتم **Brotli (`br`)** یا **Gzip (`gzip`)** فشرده و با `Content-Length` دقیق ارسال می‌کند.
+
 ---
 
 ## ۳. چک‌لیست ضروری تنظیمات پنل Cloudflare (برای همراه اول)

@@ -5,6 +5,12 @@ import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleApiRequest } from "./lib/api-router";
 import { toPersianErrorMessage } from "./lib/error-messages";
+import {
+  applyApiCorsHeaders,
+  applyFontCacheHeaders,
+  buildCompressedResponse,
+  isCompressibleContentType,
+} from "./lib/http-compression";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -21,9 +27,7 @@ async function getServerEntry(): Promise<ServerEntry> {
 
 function applyBaselineHeaders(headers: Headers): void {
   headers.delete("x-frame-options");
-  headers.set("Access-Control-Allow-Origin", "*");
-  headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, HEAD, OPTIONS");
-  headers.set("Access-Control-Allow-Headers", "Content-Type, Range, Authorization");
+  applyApiCorsHeaders(headers);
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
@@ -53,13 +57,19 @@ function isH3SwallowedErrorBody(body: string): boolean {
   }
 }
 
+function isFontPath(pathname: string): boolean {
+  return (
+    pathname.startsWith("/fonts/") ||
+    /\.(woff2?|ttf|otf|eot)$/i.test(pathname)
+  );
+}
+
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
       if (request.method.toUpperCase() === "OPTIONS") {
         const preflightHeaders = new Headers();
         applyBaselineHeaders(preflightHeaders);
-        preflightHeaders.set("Access-Control-Max-Age", "86400");
         return new Response(null, { status: 204, headers: preflightHeaders });
       }
 
@@ -89,11 +99,11 @@ export default {
               if (url.pathname === "/sw.js") {
                 headers.set("Content-Type", "application/javascript; charset=utf-8");
                 headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
+              } else if (isFontPath(url.pathname)) {
+                applyFontCacheHeaders(headers, url.pathname);
               } else if (
                 url.pathname.startsWith("/assets/") ||
-                url.pathname.startsWith("/fonts/") ||
-                url.pathname.startsWith("/_build/") ||
-                /\.(woff2?|ttf|otf|eot)$/i.test(url.pathname)
+                url.pathname.startsWith("/_build/")
               ) {
                 headers.set("Cache-Control", "public, max-age=31536000, immutable");
               } else if (url.pathname === "/robots.txt" || url.pathname === "/sitemap.xml") {
@@ -106,8 +116,6 @@ export default {
                 headers.set("Content-Type", "application/javascript; charset=utf-8");
               } else if (url.pathname.endsWith(".css")) {
                 headers.set("Content-Type", "text/css; charset=utf-8");
-              } else if (url.pathname.endsWith(".woff2")) {
-                headers.set("Content-Type", "font/woff2");
               } else if (url.pathname.endsWith(".svg")) {
                 headers.set("Content-Type", "image/svg+xml");
               } else if (url.pathname.endsWith(".webp")) {
@@ -122,6 +130,12 @@ export default {
                 });
               }
 
+              const assetContentType = headers.get("content-type") || "";
+              if (!isFontPath(url.pathname) && isCompressibleContentType(assetContentType) && !headers.get("content-encoding")) {
+                const rawBytes = new Uint8Array(await assetResponse.arrayBuffer());
+                return buildCompressedResponse(rawBytes, assetResponse.status, headers, request);
+              }
+
               return new Response(assetResponse.body, {
                 status: assetResponse.status,
                 headers,
@@ -132,22 +146,23 @@ export default {
           }
         }
 
+        const notFoundHeaders = new Headers({
+          "content-type":
+            url.pathname.endsWith(".js") || url.pathname.endsWith(".mjs")
+              ? "application/javascript; charset=utf-8"
+              : url.pathname.endsWith(".css")
+                ? "text/css; charset=utf-8"
+                : "text/plain; charset=utf-8",
+          "X-Content-Type-Options": "nosniff",
+        });
+        applyApiCorsHeaders(notFoundHeaders);
         return new Response("فایل مورد نظر یافت نشد", {
           status: 404,
-          headers: {
-            "content-type":
-              url.pathname.endsWith(".js") || url.pathname.endsWith(".mjs")
-                ? "application/javascript; charset=utf-8"
-                : url.pathname.endsWith(".css")
-                  ? "text/css; charset=utf-8"
-                  : "text/plain; charset=utf-8",
-            "Access-Control-Allow-Origin": "*",
-            "X-Content-Type-Options": "nosniff",
-          },
+          headers: notFoundHeaders,
         });
       }
 
-      // Unified API router
+      // Unified API router with universal CORS + Gzip/Brotli response compression
       if (url.pathname.startsWith("/api/")) {
         try {
           const resolvedEnv =
@@ -155,22 +170,39 @@ export default {
             (request as any)?.runtime?.cloudflare?.env ??
             (globalThis as any)?.__env__;
           const apiResponse = await handleApiRequest(request, resolvedEnv);
-          if (apiResponse) return apiResponse;
+          if (apiResponse) {
+            const apiHeaders = new Headers(apiResponse.headers);
+            applyBaselineHeaders(apiHeaders);
+
+            if (apiResponse.status === 204 || apiResponse.status === 205 || apiResponse.status === 304) {
+              return new Response(null, { status: apiResponse.status, headers: apiHeaders });
+            }
+
+            const apiCt = apiHeaders.get("content-type") || "";
+            if (isCompressibleContentType(apiCt) && !apiHeaders.get("content-encoding")) {
+              const apiBytes = new Uint8Array(await apiResponse.arrayBuffer());
+              return buildCompressedResponse(apiBytes, apiResponse.status, apiHeaders, request);
+            }
+
+            return new Response(apiResponse.body, {
+              status: apiResponse.status,
+              headers: apiHeaders,
+            });
+          }
         } catch (apiError: any) {
           console.error("[server API error]", apiError);
-          return new Response(
+          const errHeaders = new Headers({
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store, no-cache, must-revalidate",
+          });
+          applyBaselineHeaders(errHeaders);
+          const errBytes = new TextEncoder().encode(
             JSON.stringify({
               success: false,
               message: toPersianErrorMessage(apiError, "خطای داخلی سرور در پردازش درخواست."),
             }),
-            {
-              status: 500,
-              headers: {
-                "content-type": "application/json; charset=utf-8",
-                "cache-control": "no-store, no-cache, must-revalidate",
-              },
-            },
           );
+          return buildCompressedResponse(errBytes, 500, errHeaders, request);
         }
       }
 
@@ -188,23 +220,16 @@ export default {
         });
       }
 
-      // Buffer SSR HTML completely with exact byte Content-Length and strip Link preload bloat
-      // so chunked streaming & HTTP/2 header bursts do not stall over Hamrah-e-Aval (MCI) mobile DPI.
+      // Buffer SSR HTML completely with Gzip/Brotli compression + exact Content-Length,
+      // and strip Link preload bloat so Hamrah-e-Aval (MCI) DPI never stalls chunked streams.
       const contentType = (responseHeaders.get("content-type") ?? "").toLowerCase();
       if (contentType.includes("text/html") && request.method.toUpperCase() !== "HEAD") {
         const htmlText = await normalized.text();
         const htmlBytes = new TextEncoder().encode(htmlText);
         responseHeaders.delete("link");
-        responseHeaders.delete("transfer-encoding");
         responseHeaders.set("Content-Type", "text/html; charset=utf-8");
-        responseHeaders.set("Content-Length", String(htmlBytes.byteLength));
         responseHeaders.set("Cache-Control", "public, max-age=0, must-revalidate");
-        responseHeaders.set("Vary", "Accept-Encoding");
-
-        return new Response(htmlBytes, {
-          status: normalized.status,
-          headers: responseHeaders,
-        });
+        return buildCompressedResponse(htmlBytes, normalized.status, responseHeaders, request);
       }
 
       responseHeaders.set("Cache-Control", "private, no-cache, no-transform");
@@ -214,15 +239,13 @@ export default {
       });
     } catch (error) {
       console.error(error);
-      const errBytes = new TextEncoder().encode(renderErrorPage());
-      return new Response(errBytes, {
-        status: 500,
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "content-length": String(errBytes.byteLength),
-          "cache-control": "no-store",
-        },
+      const errHeaders = new Headers({
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
       });
+      applyBaselineHeaders(errHeaders);
+      const errBytes = new TextEncoder().encode(renderErrorPage());
+      return buildCompressedResponse(errBytes, 500, errHeaders, request);
     }
   },
 };

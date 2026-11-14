@@ -2,6 +2,7 @@
 import { z } from "zod";
 import { setRuntimeEnv } from "./runtime-env";
 import { toPersianErrorMessage } from "./error-messages";
+import { API_CORS_HEADERS, applyApiCorsHeaders } from "./http-compression";
 import { sendOtpSms, verifyOtpCode, normalizeIranMobile, toAsciiDigits } from "./sms-service";
 import { sendOtpEmail, verifyEmailOtpCode } from "./email-service";
 import {
@@ -99,6 +100,7 @@ function jsonResponse(
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store, no-cache, must-revalidate",
+      ...API_CORS_HEADERS,
       ...extraHeaders,
     },
   });
@@ -175,11 +177,17 @@ async function parseJson<T>(request: Request, schema: z.ZodType<T>): Promise<{ d
 }
 
 export async function handleApiRequest(request: Request, env?: any): Promise<Response | null> {
+  if (request.method.toUpperCase() === "OPTIONS") {
+    const preflightHeaders = applyApiCorsHeaders(new Headers());
+    return new Response(null, { status: 204, headers: preflightHeaders });
+  }
+
+  let response: Response | null = null;
   try {
-    return await dispatchApiRequest(request, env);
+    response = await dispatchApiRequest(request, env);
   } catch (err: any) {
     console.error("[api-router unhandled error]", err);
-    return jsonResponse(
+    response = jsonResponse(
       {
         success: false,
         message: toPersianErrorMessage(err, "خطای داخلی سرور در پردازش درخواست. لطفاً دوباره تلاش کنید."),
@@ -187,6 +195,15 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
       500,
     );
   }
+
+  if (!response) return null;
+  const headers = new Headers(response.headers);
+  applyApiCorsHeaders(headers);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 async function dispatchApiRequest(request: Request, env?: any): Promise<Response | null> {
