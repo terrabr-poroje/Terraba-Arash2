@@ -4,6 +4,7 @@
 
 import type { AppUser, AppMember } from "./auth";
 import { toPersianErrorMessage } from "./error-messages";
+import { safeStorage } from "./safe-storage";
 
 export interface VerifyEmailOtpParams {
   email: string;
@@ -100,8 +101,12 @@ export async function submitVerifyEmailOtp(
         member: data.member,
         roles: data.roles || ["buyer"],
       };
-      localStorage.setItem("terrabar_d1_session", JSON.stringify(sessionData));
-      document.cookie = `tb_session=${data.sessionToken}; path=/; max-age=2592000; SameSite=Lax`;
+      safeStorage.setItem("terrabar_d1_session", JSON.stringify(sessionData));
+      try {
+        document.cookie = `tb_session=${data.sessionToken}; path=/; max-age=2592000; SameSite=Lax`;
+      } catch {
+        // Restricted cookie context
+      }
       window.dispatchEvent(new CustomEvent("terrabar-auth-change", { detail: sessionData }));
     }
 

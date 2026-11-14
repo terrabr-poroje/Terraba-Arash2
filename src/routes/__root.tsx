@@ -13,9 +13,13 @@ import { useEffect, type ReactNode } from "react";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { MarketplaceShell } from '@/components/marketplace-shell';
+import { AppErrorBoundary } from '@/components/error-boundary';
 import { Button } from '@/components/ui/button';
 import { Toaster } from '@/components/ui/sonner';
-import { POLYFILL_INLINE_SCRIPT } from "@/lib/browser-polyfills";
+import { applyRuntimeBrowserPolyfills, POLYFILL_INLINE_SCRIPT } from "@/lib/browser-polyfills";
+import { installChunkLoadRecovery, unregisterServiceWorker } from "@/lib/safe-storage";
+
+applyRuntimeBrowserPolyfills();
 
 function NotFoundComponent() {
   return (
@@ -149,10 +153,24 @@ function RootShell({ children }: { children: ReactNode }) {
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
 
+  useEffect(() => {
+    const cleanupChunkRecovery = installChunkLoadRecovery();
+    const timer = window.setTimeout(() => {
+      unregisterServiceWorker();
+    }, 300);
+
+    return () => {
+      window.clearTimeout(timer);
+      cleanupChunkRecovery();
+    };
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
       {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <MarketplaceShell><Outlet /></MarketplaceShell>
+      <AppErrorBoundary>
+        <MarketplaceShell><Outlet /></MarketplaceShell>
+      </AppErrorBoundary>
       <Toaster position="top-center" dir="rtl" richColors />
     </QueryClientProvider>
   );

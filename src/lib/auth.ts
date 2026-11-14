@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useState } from "react";
+import { safeStorage } from "./safe-storage";
 
 export type AppRole =
   | "admin"
@@ -73,7 +74,7 @@ export function useAuth() {
     }
 
     try {
-      const stored = localStorage.getItem("terrabar_d1_session");
+      const stored = safeStorage.getItem("terrabar_d1_session");
       if (stored) {
         const parsed = JSON.parse(stored) as AppSession;
         if (parsed?.token && parsed?.user) {
@@ -94,7 +95,7 @@ export function useAuth() {
       const timeoutId = controller ? window.setTimeout(() => controller.abort(), 6000) : null;
 
       try {
-        const stored = localStorage.getItem("terrabar_d1_session");
+        const stored = safeStorage.getItem("terrabar_d1_session");
         const token = stored ? (JSON.parse(stored) as AppSession)?.token : "";
 
         if (!token) {
@@ -109,8 +110,8 @@ export function useAuth() {
 
         if (res.status === 401) {
           if (active) {
-            localStorage.removeItem("terrabar_d1_session");
-            document.cookie = "tb_session=; Path=/; Max-Age=0; SameSite=Lax";
+            safeStorage.removeItem("terrabar_d1_session");
+            try { document.cookie = "tb_session=; Path=/; Max-Age=0; SameSite=Lax"; } catch { /* Restricted cookie context */ }
             applySession(null);
           }
           return;
@@ -130,11 +131,11 @@ export function useAuth() {
               member: data.session.member,
               roles: data.session.roles,
             };
-            localStorage.setItem("terrabar_d1_session", JSON.stringify(updatedSession));
+            safeStorage.setItem("terrabar_d1_session", JSON.stringify(updatedSession));
             applySession(updatedSession);
           } else {
-            localStorage.removeItem("terrabar_d1_session");
-            document.cookie = "tb_session=; Path=/; Max-Age=0; SameSite=Lax";
+            safeStorage.removeItem("terrabar_d1_session");
+            try { document.cookie = "tb_session=; Path=/; Max-Age=0; SameSite=Lax"; } catch { /* Restricted cookie context */ }
             applySession(null);
           }
         }
@@ -191,7 +192,7 @@ export function useAuth() {
 
 export async function signOut() {
   try {
-    const stored = localStorage.getItem("terrabar_d1_session");
+    const stored = safeStorage.getItem("terrabar_d1_session");
     const token = stored ? (JSON.parse(stored) as AppSession)?.token : "";
 
     await fetch("/api/auth/logout", {
@@ -200,8 +201,8 @@ export async function signOut() {
       body: JSON.stringify({ token }),
     }).catch(() => {});
   } finally {
-    localStorage.removeItem("terrabar_d1_session");
-    document.cookie = "tb_session=; Path=/; Max-Age=0; SameSite=Lax";
+    safeStorage.removeItem("terrabar_d1_session");
+    try { document.cookie = "tb_session=; Path=/; Max-Age=0; SameSite=Lax"; } catch { /* Restricted cookie context */ }
     window.dispatchEvent(new CustomEvent("terrabar-auth-change", { detail: null }));
   }
 }

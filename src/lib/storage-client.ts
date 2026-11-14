@@ -1,5 +1,6 @@
 import { convertToOptimizedWebP, formatBytes, type OptimizedWebPResult } from "./image-optimizer";
 import { toPersianErrorMessage } from "./error-messages";
+import { safeStorage } from "./safe-storage";
 
 export interface StorageUploadResponse {
   success: boolean;
@@ -51,7 +52,7 @@ export async function uploadFileWithWebPOptimization(
   // Retrieve auth token if present
   let token = "";
   try {
-    const raw = localStorage.getItem("terrabar_d1_session");
+    const raw = safeStorage.getItem("terrabar_d1_session");
     if (raw) token = JSON.parse(raw)?.token || "";
   } catch {
     // ignore
@@ -93,7 +94,7 @@ export async function deleteFileFromStorage(
 
   let token = "";
   try {
-    const raw = localStorage.getItem("terrabar_d1_session");
+    const raw = safeStorage.getItem("terrabar_d1_session");
     if (raw) token = JSON.parse(raw)?.token || "";
   } catch {
     // ignore

@@ -1,10 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { toPersianErrorMessage } from "./error-messages";
+import { safeStorage } from "./safe-storage";
 
 export function getSessionToken(): string {
   if (typeof window === "undefined") return "";
   try {
-    const raw = window.localStorage.getItem("terrabar_d1_session");
+    const raw = safeStorage.getItem("terrabar_d1_session");
     if (!raw) return "";
     const parsed = JSON.parse(raw);
     return parsed?.token || "";
@@ -15,8 +16,12 @@ export function getSessionToken(): string {
 
 export function saveStoredSession(session: any): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem("terrabar_d1_session", JSON.stringify(session));
-  document.cookie = `tb_session=${encodeURIComponent(session.token)}; Path=/; Max-Age=2592000; SameSite=Lax`;
+  safeStorage.setItem("terrabar_d1_session", JSON.stringify(session));
+  try {
+    document.cookie = `tb_session=${encodeURIComponent(session.token)}; Path=/; Max-Age=2592000; SameSite=Lax`;
+  } catch {
+    // Restricted cookie context
+  }
   window.dispatchEvent(new CustomEvent("terrabar-auth-change", { detail: session }));
 }
 

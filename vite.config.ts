@@ -107,11 +107,43 @@ export default defineConfig({
       },
     },
     build: {
-      target: ["es2018", "chrome65", "edge18", "firefox65", "safari12"],
-      cssTarget: ["chrome61", "firefox60", "safari11", "edge18"],
+      target: ["es2015", "edge18", "firefox60", "chrome60", "safari11"],
+      cssTarget: ["chrome60", "firefox60", "safari11", "edge18"],
+      chunkSizeWarningLimit: 700,
+    },
+    environments: {
+      client: {
+        build: {
+          rollupOptions: {
+            output: {
+              manualChunks(id) {
+                if (id.includes("node_modules/lucide-react")) {
+                  return "lucide-icons";
+                }
+                if (
+                  id.includes("node_modules/react/") ||
+                  id.includes("node_modules/react-dom/") ||
+                  id.includes("node_modules/scheduler/")
+                ) {
+                  return "react-vendor";
+                }
+                if (id.includes("node_modules/@tanstack/")) {
+                  return "tanstack-vendor";
+                }
+                if (id.includes("node_modules/@radix-ui/")) {
+                  return "ui-vendor";
+                }
+                if (id.includes("node_modules/recharts/") || id.includes("node_modules/d3-")) {
+                  return "charts-vendor";
+                }
+              },
+            },
+          },
+        },
+      },
     },
     esbuild: {
-      target: "es2018",
+      target: "es2015",
     },
   },
   tanstackStart: {

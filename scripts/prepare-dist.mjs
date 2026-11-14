@@ -113,6 +113,32 @@ const indexHtmlContent = `<!DOCTYPE html>
             else if (typeof self !== 'undefined') self.globalThis = self;
           }
           if (typeof window !== 'undefined') {
+            if (!window.console) {
+              window.console = { log: function(){}, warn: function(){}, error: function(){}, info: function(){} };
+            }
+            var storageBlocked = false;
+            try {
+              var probe = '__tb_probe__';
+              window.localStorage.setItem(probe, probe);
+              window.localStorage.removeItem(probe);
+            } catch (err) {
+              storageBlocked = true;
+            }
+            if (storageBlocked) {
+              var createMemoryStore = function() {
+                var data = {};
+                return {
+                  getItem: function(k) { return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
+                  setItem: function(k, v) { data[k] = String(v); },
+                  removeItem: function(k) { delete data[k]; },
+                  clear: function() { data = {}; },
+                  get length() { return Object.keys(data).length; },
+                  key: function(i) { return Object.keys(data)[i] || null; }
+                };
+              };
+              try { Object.defineProperty(window, 'localStorage', { value: createMemoryStore(), configurable: true, writable: true }); } catch (e) {}
+              try { Object.defineProperty(window, 'sessionStorage', { value: createMemoryStore(), configurable: true, writable: true }); } catch (e) {}
+            }
             var c = window.crypto || window.msCrypto;
             if (!c) {
               try {

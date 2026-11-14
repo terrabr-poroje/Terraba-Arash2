@@ -4,6 +4,7 @@
  */
 
 import { useState, useEffect } from "react";
+import { safeStorage } from "./safe-storage";
 
 export type Theme = "light" | "dark" | "system";
 
@@ -15,7 +16,7 @@ const THEME_STORAGE_KEY = "terrabar-theme";
 export function getSavedTheme(): Theme {
   if (typeof window === "undefined") return "system";
   try {
-    const val = localStorage.getItem(THEME_STORAGE_KEY);
+    const val = safeStorage.getItem(THEME_STORAGE_KEY);
     if (val === "light" || val === "dark" || val === "system") {
       return val;
     }
@@ -67,7 +68,7 @@ export function applyTheme(theme: Theme): void {
 
   // Persist preference
   try {
-    localStorage.setItem(THEME_STORAGE_KEY, theme);
+    safeStorage.setItem(THEME_STORAGE_KEY, theme);
   } catch {
     // Ignore storage issues
   }
@@ -117,13 +118,25 @@ export function useTheme() {
     window.addEventListener("terrabar-theme-change", handleThemeChange);
     window.addEventListener("storage", handleThemeChange);
 
-    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-    mediaQuery.addEventListener("change", handleSystemMediaChange);
+    const mediaQuery = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+    if (mediaQuery) {
+      if (typeof mediaQuery.addEventListener === "function") {
+        mediaQuery.addEventListener("change", handleSystemMediaChange);
+      } else if (typeof mediaQuery.addListener === "function") {
+        mediaQuery.addListener(handleSystemMediaChange);
+      }
+    }
 
     return () => {
       window.removeEventListener("terrabar-theme-change", handleThemeChange);
       window.removeEventListener("storage", handleThemeChange);
-      mediaQuery.removeEventListener("change", handleSystemMediaChange);
+      if (mediaQuery) {
+        if (typeof mediaQuery.removeEventListener === "function") {
+          mediaQuery.removeEventListener("change", handleSystemMediaChange);
+        } else if (typeof mediaQuery.removeListener === "function") {
+          mediaQuery.removeListener(handleSystemMediaChange);
+        }
+      }
     };
   }, []);
 
