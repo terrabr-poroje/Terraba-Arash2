@@ -4,20 +4,19 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleApiRequest } from "./lib/api-router";
+import { toPersianErrorMessage } from "./lib/error-messages";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
 };
 
-let serverEntryPromise: Promise<ServerEntry> | undefined;
+let cachedServerEntry: ServerEntry | undefined;
 
 async function getServerEntry(): Promise<ServerEntry> {
-  if (!serverEntryPromise) {
-    serverEntryPromise = import("@tanstack/react-start/server-entry").then(
-      (m) => (m.default ?? m) as ServerEntry,
-    );
-  }
-  return serverEntryPromise;
+  if (cachedServerEntry) return cachedServerEntry;
+  const mod = await import("@tanstack/react-start/server-entry");
+  cachedServerEntry = (mod.default ?? mod) as ServerEntry;
+  return cachedServerEntry;
 }
 
 async function normalizeCatastrophicSsrResponse(response: Response): Promise<Response> {
@@ -138,7 +137,7 @@ export default {
           return new Response(
             JSON.stringify({
               success: false,
-              message: apiError?.message || "خطای داخلی سرور در پردازش درخواست",
+              message: toPersianErrorMessage(apiError, "خطای داخلی سرور در پردازش درخواست."),
             }),
             {
               status: 500,
@@ -160,6 +159,13 @@ export default {
       responseHeaders.set("Access-Control-Allow-Origin", "*");
       responseHeaders.set("X-Content-Type-Options", "nosniff");
       responseHeaders.set("Cache-Control", "private, no-cache, no-transform");
+
+      if (normalized.status === 304 || normalized.status === 204 || normalized.status === 205) {
+        return new Response(null, {
+          status: normalized.status,
+          headers: responseHeaders,
+        });
+      }
 
       return new Response(normalized.body, {
         status: normalized.status,

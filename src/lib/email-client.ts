@@ -3,6 +3,7 @@
  */
 
 import type { AppUser, AppMember } from "./auth";
+import { toPersianErrorMessage } from "./error-messages";
 
 export interface VerifyEmailOtpParams {
   email: string;
@@ -56,9 +57,12 @@ export async function requestEmailOtp(
       signal: timeout.signal,
     });
     const data = (await res.json().catch(() => ({}))) as { success?: boolean; message?: string };
+    const success = Boolean(res.ok && data.success);
     return {
-      success: !!data.success,
-      message: data.message || (res.ok ? "کد تأیید به نشانی ایمیل شما ارسال شد." : "خطا در ارسال ایمیل"),
+      success,
+      message: success
+        ? data.message || "کد تأیید به نشانی ایمیل شما ارسال شد."
+        : toPersianErrorMessage(data.message, "خطا در ارسال ایمیل تأیید. لطفاً دوباره تلاش کنید."),
     };
   } catch (err) {
     console.error("[requestEmailOtp error]", err);
@@ -66,7 +70,7 @@ export async function requestEmailOtp(
       success: false,
       message: isAbortError(err)
         ? "پاسخ‌گویی سرور ایمیل طولانی شد. لطفاً چند لحظه بعد دوباره تلاش کنید."
-        : "خطا در برقراری ارتباط با سرور ایمیل. لطفاً دوباره تلاش کنید.",
+        : toPersianErrorMessage(err, "خطا در برقراری ارتباط با سرور ایمیل. لطفاً دوباره تلاش کنید."),
     };
   } finally {
     timeout.cleanup();
@@ -101,9 +105,12 @@ export async function submitVerifyEmailOtp(
       window.dispatchEvent(new CustomEvent("terrabar-auth-change", { detail: sessionData }));
     }
 
+    const success = Boolean(res.ok && data.success);
     return {
-      success: !!data.success,
-      message: data.message || (res.ok ? "ورود با موفقیت انجام شد." : "کد تأیید نامعتبر است."),
+      success,
+      message: success
+        ? data.message || "ورود با موفقیت انجام شد."
+        : toPersianErrorMessage(data.message, "کد تأیید نامعتبر است یا ورود انجام نشد."),
       user: data.user,
       member: data.member,
       roles: data.roles,
@@ -115,7 +122,7 @@ export async function submitVerifyEmailOtp(
       success: false,
       message: isAbortError(err)
         ? "پاسخ‌گویی سرور طولانی شد. لطفاً دوباره تلاش کنید."
-        : "خطا در برقراری ارتباط با سرور برای تأیید کد و ورود.",
+        : toPersianErrorMessage(err, "خطا در برقراری ارتباط با سرور برای تأیید کد و ورود."),
     };
   } finally {
     timeout.cleanup();
@@ -143,9 +150,12 @@ export async function requestPasswordReset(
       deliveryMethod?: string;
       target?: string;
     };
+    const success = Boolean(res.ok && data.success);
     return {
-      success: !!data.success,
-      message: data.message || (res.ok ? "کد بازیابی ارسال شد." : "خطا در ارسال کد"),
+      success,
+      message: success
+        ? data.message || "کد بازیابی ارسال شد."
+        : toPersianErrorMessage(data.message, "خطا در ارسال کد بازیابی."),
       deliveryMethod: data.deliveryMethod,
       target: data.target,
     };
@@ -153,7 +163,7 @@ export async function requestPasswordReset(
     console.error("[requestPasswordReset error]", err);
     return {
       success: false,
-      message: "خطا در اتصال به سرور جهت درخواست بازیابی رمز عبور.",
+      message: toPersianErrorMessage(err, "خطا در اتصال به سرور جهت درخواست بازیابی رمز عبور."),
     };
   } finally {
     timeout.cleanup();
@@ -177,15 +187,18 @@ export async function submitResetPasswordWithOtp(params: {
       signal: timeout.signal,
     });
     const data = (await res.json().catch(() => ({}))) as { success?: boolean; message?: string };
+    const success = Boolean(res.ok && data.success);
     return {
-      success: !!data.success,
-      message: data.message || (res.ok ? "رمز عبور با موفقیت به‌روزرسانی شد." : "خطا در ثبت رمز عبور جدید"),
+      success,
+      message: success
+        ? data.message || "رمز عبور با موفقیت به‌روزرسانی شد."
+        : toPersianErrorMessage(data.message, "خطا در ثبت رمز عبور جدید."),
     };
   } catch (err) {
     console.error("[submitResetPasswordWithOtp error]", err);
     return {
       success: false,
-      message: "خطا در ارتباط با سرور جهت تغییر رمز عبور.",
+      message: toPersianErrorMessage(err, "خطا در ارتباط با سرور جهت تغییر رمز عبور."),
     };
   } finally {
     timeout.cleanup();

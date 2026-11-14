@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { z } from "zod";
 import { setRuntimeEnv } from "./runtime-env";
+import { toPersianErrorMessage } from "./error-messages";
 import { sendOtpSms, verifyOtpCode, normalizeIranMobile, toAsciiDigits } from "./sms-service";
 import { sendOtpEmail, verifyEmailOtpCode } from "./email-service";
 import {
@@ -75,7 +76,25 @@ function jsonResponse(
   status = 200,
   extraHeaders: Record<string, string> = {},
 ): Response {
-  return new Response(JSON.stringify(data), {
+  let bodyData = data;
+  if (bodyData && typeof bodyData === "object" && !Array.isArray(bodyData)) {
+    const isErr = status >= 400 || bodyData.success === false;
+    if (isErr) {
+      const cloned = { ...bodyData };
+      if (typeof cloned.message === "string" || typeof cloned.error === "string") {
+        const msg = toPersianErrorMessage(
+          cloned.message || cloned.error,
+          status >= 500
+            ? "خطای داخلی سرور در پردازش درخواست. لطفاً دوباره تلاش کنید."
+            : "درخواست شما معتبر نیست یا با خطا مواجه شد.",
+        );
+        cloned.message = msg;
+        if (typeof cloned.error === "string") cloned.error = msg;
+      }
+      bodyData = cloned;
+    }
+  }
+  return new Response(JSON.stringify(bodyData), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
@@ -143,17 +162,34 @@ function getClientKey(request: Request): string {
 async function parseJson<T>(request: Request, schema: z.ZodType<T>): Promise<{ data?: T; error?: string }> {
   const raw = await request.json().catch(() => null);
   if (!raw || typeof raw !== "object") {
-    return { error: "ساختار درخواست JSON نامعتبر است." };
+    return { error: "ساختار درخواست نامعتبر است." };
   }
   const parsed = schema.safeParse(raw);
   if (!parsed.success) {
     const firstIssue = parsed.error.issues[0];
-    return { error: firstIssue?.message || "ورودی‌های ارسال‌شده معتبر نیستند." };
+    return {
+      error: toPersianErrorMessage(firstIssue?.message, "لطفاً تمام فیلدهای ضروری را با مقادیر معتبر تکمیل کنید."),
+    };
   }
   return { data: parsed.data };
 }
 
 export async function handleApiRequest(request: Request, env?: any): Promise<Response | null> {
+  try {
+    return await dispatchApiRequest(request, env);
+  } catch (err: any) {
+    console.error("[api-router unhandled error]", err);
+    return jsonResponse(
+      {
+        success: false,
+        message: toPersianErrorMessage(err, "خطای داخلی سرور در پردازش درخواست. لطفاً دوباره تلاش کنید."),
+      },
+      500,
+    );
+  }
+}
+
+async function dispatchApiRequest(request: Request, env?: any): Promise<Response | null> {
   const resolvedEnv =
     env ??
     (request as any)?.runtime?.cloudflare?.env ??
@@ -1063,7 +1099,10 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
         message: "فایل با موفقیت با فرمت WebP در فضای ابری ذخیره شد.",
       });
     } catch (err: any) {
-      return jsonResponse({ success: false, message: `خطا در بارگذاری فایل: ${err?.message || err}` }, 500);
+      return jsonResponse(
+        { success: false, message: toPersianErrorMessage(err, "خطا در بارگذاری فایل. لطفاً دوباره تلاش کنید.") },
+        500,
+      );
     }
   }
 
@@ -1081,17 +1120,22 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
       const deleteResult = await deleteFromParsPack(parsed.data.key);
       return jsonResponse(deleteResult);
     } catch (err: any) {
-      return jsonResponse({ success: false, message: `خطا در حذف فایل: ${err?.message || err}` }, 500);
+      return jsonResponse(
+        { success: false, message: toPersianErrorMessage(err, "خطا در حذف فایل. لطفاً دوباره تلاش کنید.") },
+        500,
+      );
     }
   }
 
   if (pathname.startsWith("/api/storage/file/") && method === "GET") {
     const fileKey = decodeURIComponent(pathname.replace(/^\/api\/storage\/file\//, ""));
-    if (!fileKey) return new Response("Not found", { status: 404 });
+    if (!fileKey) return new Response("فایل یافت نشد.", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
 
     try {
       const fileData = await getFileFromParsPack(fileKey);
-      if (!fileData || !fileData.stream) return new Response("File not found", { status: 404 });
+      if (!fileData || !fileData.stream) {
+        return new Response("فایل یافت نشد.", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
+      }
 
       const headers: Record<string, string> = {
         "Content-Type": fileData.contentType || "image/webp",
@@ -1101,7 +1145,7 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
 
       return new Response(fileData.stream, { status: 200, headers });
     } catch {
-      return new Response("Error fetching file", { status: 500 });
+      return new Response("خطا در دریافت فایل.", { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
     }
   }
 

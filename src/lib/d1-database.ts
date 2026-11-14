@@ -4,6 +4,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { getEnvVar } from "./runtime-env";
+import { toPersianErrorMessage } from "./error-messages";
 import {
   sendOtpSms,
   verifyOtpCode,
@@ -51,16 +52,12 @@ export interface D1Database {
 }
 
 let cloudflareD1Binding: D1Database | null = null;
-let schemaInitPromise: Promise<void> | null = null;
 let schemaInitDoneForD1 = false;
+let schemaInitDoneForLocal = false;
 
 export function setCloudflareD1Binding(db: any) {
   if (db && typeof db.prepare === "function") {
-    const hadBinding = Boolean(cloudflareD1Binding);
     cloudflareD1Binding = db;
-    if (!hadBinding && !schemaInitDoneForD1) {
-      schemaInitPromise = null;
-    }
   }
 }
 
@@ -228,10 +225,11 @@ export function getAdminRecoveryEmail(): string {
 }
 
 export async function initD1Schema(): Promise<void> {
-  if (schemaInitPromise) return schemaInitPromise;
+  const hasD1Binding = Boolean(cloudflareD1Binding || (globalThis as any)?.__env__?.DB);
+  if (hasD1Binding && schemaInitDoneForD1) return;
+  if (!hasD1Binding && schemaInitDoneForLocal) return;
 
-  schemaInitPromise = (async () => {
-    const db = getD1();
+  const db = getD1();
     const schemaSql = `
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -871,13 +869,9 @@ export async function initD1Schema(): Promise<void> {
 
     if (cloudflareD1Binding) {
       schemaInitDoneForD1 = true;
+    } else {
+      schemaInitDoneForLocal = true;
     }
-  })().catch((err) => {
-    schemaInitPromise = null;
-    throw err;
-  });
-
-  return schemaInitPromise;
 }
 
 // ==========================================
@@ -1279,7 +1273,7 @@ async function runWithSchemaRepair<T>(op: () => Promise<T>): Promise<T> {
     const msg = String(err?.message || err || "").toLowerCase();
     if (msg.includes("no column named") || msg.includes("no such column") || msg.includes("no such table")) {
       schemaInitDoneForD1 = false;
-      schemaInitPromise = null;
+      schemaInitDoneForLocal = false;
       await initD1Schema();
       return await op();
     }
@@ -2320,7 +2314,10 @@ export async function submitMembershipRequest(payload: MembershipRequestPayload)
     };
   } catch (err: any) {
     console.error("[d1] submitMembershipRequest error:", err);
-    return { success: false, message: "خطا در ثبت درخواست در پایگاه داده: " + (err?.message || err) };
+    return {
+      success: false,
+      message: toPersianErrorMessage(err, "خطا در ثبت درخواست در پایگاه داده. لطفاً دوباره تلاش کنید."),
+    };
   }
 }
 
@@ -2616,8 +2613,8 @@ export async function updateRoleApprovalStatus(
     const smsPhone = updatedMemberRow?.phone || targetRole?.phone;
     const smsName = updatedMemberRow?.full_name || targetRole?.full_name || "کاربر گرامی";
     if (smsPhone) {
-      Promise.resolve(
-        sendEventNotificationSms({
+      try {
+        await sendEventNotificationSms({
           mobile: smsPhone,
           eventType: status === "approved" ? "role_approved" : "role_rejected",
           messageText:
@@ -2625,10 +2622,10 @@ export async function updateRoleApprovalStatus(
               ? `ترابار: عضویت و دسترسی ${effectiveRoleCode} برای حساب ${smsName} تأیید و فعال شد.`
               : `ترابار: درخواست ارتقای نقش ${effectiveRoleCode} تأیید نشد. جزئیات را در حساب کاربری ببینید.`,
           relatedId: effectiveMemberId,
-        }),
-      ).catch((smsErr) => {
+        });
+      } catch (smsErr) {
         console.warn("[d1] role approval sms error:", smsErr);
-      });
+      }
     }
 
     return {
@@ -2640,7 +2637,7 @@ export async function updateRoleApprovalStatus(
     console.error("[d1] updateRoleApprovalStatus error:", err);
     return {
       success: false,
-      error: err?.message || "خطای پایگاه داده در به‌روزرسانی وضعیت درخواست",
+      error: toPersianErrorMessage(err, "خطای پایگاه داده در به‌روزرسانی وضعیت درخواست."),
     };
   }
 }
@@ -2701,7 +2698,7 @@ export async function deleteRoleRequest(
     return { success: false, message: "درخواست مورد نظر برای حذف پیدا نشد." };
   } catch (err: any) {
     console.error("[d1] deleteRoleRequest error:", err);
-    return { success: false, message: err?.message || "خطا در حذف درخواست" };
+    return { success: false, message: toPersianErrorMessage(err, "خطا در حذف درخواست.") };
   }
 }
 
@@ -3508,31 +3505,36 @@ export async function syncOrderToDatabase(order: any): Promise<any> {
 
   const savedOrder = await db.prepare("SELECT * FROM orders WHERE id = ? LIMIT 1").bind(id).first<any>();
 
-  // Trigger buyer + seller SMS & Email notifications asynchronously
+  // Dispatch buyer + seller SMS & Email notifications within the same request lifecycle
   const productTitle = loadRow?.product_type || loadRow?.name || "محصول";
+  const notificationTasks: Array<Promise<unknown>> = [];
   if (customerPhone) {
-    void sendEventNotificationSms({
-      mobile: customerPhone,
-      eventType: "order_created_buyer",
-      messageText: `ترابار: سفارش شما با شماره فاکتور #${invoiceNumber} برای «${productTitle}» (${quantity} ${unit}) ثبت شد و در انتظار تأیید فروشنده است.`,
-      relatedId: id,
-    });
+    notificationTasks.push(
+      sendEventNotificationSms({
+        mobile: customerPhone,
+        eventType: "order_created_buyer",
+        messageText: `ترابار: سفارش شما با شماره فاکتور #${invoiceNumber} برای «${productTitle}» (${quantity} ${unit}) ثبت شد و در انتظار تأیید فروشنده است.`,
+        relatedId: id,
+      }),
+    );
   }
   if (customerEmail) {
-    void sendEventNotificationEmail({
-      email: customerEmail,
-      eventType: "order_created_buyer_email",
-      subject: `ثبت سفارش #${invoiceNumber} در ترابار`,
-      heading: `سفارش شما با موفقیت ثبت شد`,
-      description: `سفارش «${productTitle}» به نام ${customerName} در سامانه ثبت گردید و برای فروشنده ارسال شد.`,
-      detailsRows: [
-        { label: "شماره فاکتور", value: `#${invoiceNumber}` },
-        { label: "محصول", value: productTitle },
-        { label: "مقدار", value: `${quantity} ${unit}` },
-        { label: "مبلغ کل", value: `${Number(totalPrice).toLocaleString("fa-IR")} تومان` },
-      ],
-      relatedId: id,
-    });
+    notificationTasks.push(
+      sendEventNotificationEmail({
+        email: customerEmail,
+        eventType: "order_created_buyer_email",
+        subject: `ثبت سفارش #${invoiceNumber} در ترابار`,
+        heading: `سفارش شما با موفقیت ثبت شد`,
+        description: `سفارش «${productTitle}» به نام ${customerName} در سامانه ثبت گردید و برای فروشنده ارسال شد.`,
+        detailsRows: [
+          { label: "شماره فاکتور", value: `#${invoiceNumber}` },
+          { label: "محصول", value: productTitle },
+          { label: "مقدار", value: `${quantity} ${unit}` },
+          { label: "مبلغ کل", value: `${Number(totalPrice).toLocaleString("fa-IR")} تومان` },
+        ],
+        relatedId: id,
+      }),
+    );
   }
 
   if (sellerMemberId) {
@@ -3541,28 +3543,36 @@ export async function syncOrderToDatabase(order: any): Promise<any> {
       .bind(sellerMemberId)
       .first<any>();
     if (sellerMember?.phone) {
-      void sendEventNotificationSms({
-        mobile: sellerMember.phone,
-        eventType: "order_created_seller",
-        messageText: `ترابار: سفارش جدید #${invoiceNumber} برای «${productTitle}» از ${customerName} ثبت شد. لطفاً در بخش مدیریت سفارش‌ها بررسی و تأیید کنید.`,
-        relatedId: id,
-      });
+      notificationTasks.push(
+        sendEventNotificationSms({
+          mobile: sellerMember.phone,
+          eventType: "order_created_seller",
+          messageText: `ترابار: سفارش جدید #${invoiceNumber} برای «${productTitle}» از ${customerName} ثبت شد. لطفاً در بخش مدیریت سفارش‌ها بررسی و تأیید کنید.`,
+          relatedId: id,
+        }),
+      );
     }
     if (sellerMember?.email) {
-      void sendEventNotificationEmail({
-        email: sellerMember.email,
-        eventType: "order_created_seller_email",
-        subject: `سفارش جدید #${invoiceNumber} در ترابار`,
-        heading: "یک سفارش جدید دریافت کردید",
-        description: `خریدار (${customerName}) سفارش جدیدی برای محصول «${productTitle}» ثبت کرده است.`,
-        detailsRows: [
-          { label: "شماره فاکتور", value: `#${invoiceNumber}` },
-          { label: "مقدار سفارش", value: `${quantity} ${unit}` },
-          { label: "مبلغ کل", value: `${Number(totalPrice).toLocaleString("fa-IR")} تومان` },
-        ],
-        relatedId: id,
-      });
+      notificationTasks.push(
+        sendEventNotificationEmail({
+          email: sellerMember.email,
+          eventType: "order_created_seller_email",
+          subject: `سفارش جدید #${invoiceNumber} در ترابار`,
+          heading: "یک سفارش جدید دریافت کردید",
+          description: `خریدار (${customerName}) سفارش جدیدی برای محصول «${productTitle}» ثبت کرده است.`,
+          detailsRows: [
+            { label: "شماره فاکتور", value: `#${invoiceNumber}` },
+            { label: "مقدار سفارش", value: `${quantity} ${unit}` },
+            { label: "مبلغ کل", value: `${Number(totalPrice).toLocaleString("fa-IR")} تومان` },
+          ],
+          relatedId: id,
+        }),
+      );
     }
+  }
+
+  if (notificationTasks.length > 0) {
+    await Promise.allSettled(notificationTasks);
   }
 
   return savedOrder;
@@ -3697,12 +3707,16 @@ export async function updateOrderLifecycle(params: {
     mark_paid: "تسویه/پرداخت ثبت شد",
   };
   if (order.customer_phone) {
-    void sendEventNotificationSms({
-      mobile: order.customer_phone,
-      eventType: "order_status_updated",
-      messageText: `ترابار: وضعیت سفارش #${order.invoice_number} به «${statusLabelMap[params.action]}» تغییر یافت.`,
-      relatedId: order.id,
-    });
+    try {
+      await sendEventNotificationSms({
+        mobile: order.customer_phone,
+        eventType: "order_status_updated",
+        messageText: `ترابار: وضعیت سفارش #${order.invoice_number} به «${statusLabelMap[params.action]}» تغییر یافت.`,
+        relatedId: order.id,
+      });
+    } catch (smsErr) {
+      console.warn("[d1] order lifecycle sms error:", smsErr);
+    }
   }
 
   await recordAuditLog({
@@ -4103,12 +4117,16 @@ export async function requestSellerPayout(params: {
 
   const member = await db.prepare("SELECT phone, full_name FROM members WHERE id = ? LIMIT 1").bind(params.memberId).first<any>();
   if (member?.phone) {
-    void sendEventNotificationSms({
-      mobile: member.phone,
-      eventType: "payout_requested",
-      messageText: `ترابار: درخواست تسویه حساب شما به مبلغ ${amount.toLocaleString("fa-IR")} تومان (کد ${ref}) ثبت شد و در صف پرداخت است.`,
-      relatedId: id,
-    });
+    try {
+      await sendEventNotificationSms({
+        mobile: member.phone,
+        eventType: "payout_requested",
+        messageText: `ترابار: درخواست تسویه حساب شما به مبلغ ${amount.toLocaleString("fa-IR")} تومان (کد ${ref}) ثبت شد و در صف پرداخت است.`,
+        relatedId: id,
+      });
+    } catch (smsErr) {
+      console.warn("[d1] payout requested sms error:", smsErr);
+    }
   }
 
   const tx = await db.prepare("SELECT * FROM seller_financial_transactions WHERE id = ? LIMIT 1").bind(id).first<any>();
@@ -4565,12 +4583,16 @@ export async function adminUpdatePayoutStatus(params: {
 
     const member = await db.prepare("SELECT phone FROM members WHERE id = ? LIMIT 1").bind(tx.member_id).first<any>();
     if (member?.phone) {
-      void sendEventNotificationSms({
-        mobile: member.phone,
-        eventType: "payout_paid",
-        messageText: `ترابار: مبلغ ${Math.abs(Number(tx.amount) || 0).toLocaleString("fa-IR")} تومان به شبای ثبت‌شده شما واریز شد. کد پیگیری: ${params.referenceCode || tx.reference_code || "-"}`,
-        relatedId: tx.id,
-      });
+      try {
+        await sendEventNotificationSms({
+          mobile: member.phone,
+          eventType: "payout_paid",
+          messageText: `ترابار: مبلغ ${Math.abs(Number(tx.amount) || 0).toLocaleString("fa-IR")} تومان به شبای ثبت‌شده شما واریز شد. کد پیگیری: ${params.referenceCode || tx.reference_code || "-"}`,
+          relatedId: tx.id,
+        });
+      } catch (smsErr) {
+        console.warn("[d1] payout paid sms error:", smsErr);
+      }
     }
   }
 

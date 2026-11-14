@@ -1,4 +1,5 @@
 import { convertToOptimizedWebP, formatBytes, type OptimizedWebPResult } from "./image-optimizer";
+import { toPersianErrorMessage } from "./error-messages";
 
 export interface StorageUploadResponse {
   success: boolean;
@@ -64,7 +65,12 @@ export async function uploadFileWithWebPOptimization(
 
   if (!response.ok) {
     const errData = (await response.json().catch(() => ({}))) as { message?: string };
-    throw new Error(errData.message || `خطا در بارگذاری فایل در فضای ذخیره‌سازی (${response.status})`);
+    throw new Error(
+      toPersianErrorMessage(
+        errData.message,
+        `خطا در بارگذاری فایل در فضای ذخیره‌سازی (کد ${response.status})`,
+      ),
+    );
   }
 
   const result = (await response.json()) as StorageUploadResponse;
@@ -104,7 +110,12 @@ export async function deleteFileFromStorage(
 
   if (!response.ok) {
     const errData = (await response.json().catch(() => ({}))) as { message?: string };
-    throw new Error(errData.message || `خطا در حذف فایل از فضای ذخیره‌سازی (${response.status})`);
+    throw new Error(
+      toPersianErrorMessage(
+        errData.message,
+        `خطا در حذف فایل از فضای ذخیره‌سازی (کد ${response.status})`,
+      ),
+    );
   }
 
   return (await response.json()) as { success: boolean; message: string };

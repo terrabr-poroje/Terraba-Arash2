@@ -4,6 +4,7 @@
  */
 
 import { getEnvVar } from "./runtime-env";
+import { toPersianErrorMessage } from "./error-messages";
 import { generateOtpCode, otpStore, toAsciiDigits, type SmsLogPayload } from "./sms-service";
 
 type EmailPersistenceHook = {
@@ -108,7 +109,7 @@ export async function sendEmailViaResend(params: {
   }
 
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), 10000) : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 5000) : null;
   try {
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -138,15 +139,13 @@ export async function sendEmailViaResend(params: {
     return {
       ok: false,
       status: response.status,
-      error: data?.message || `خطای سرویس ایمیل با وضعیت ${response.status}`,
+      error: toPersianErrorMessage(data?.message, `خطای سرویس ایمیل (کد ${response.status})`),
     };
   } catch (err: unknown) {
     const isTimeout = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
     const message = isTimeout
-      ? "مهلت زمانی ارتباط با سرویس ایمیل (Resend) به پایان رسید."
-      : err instanceof Error
-        ? err.message
-        : String(err);
+      ? "مهلت زمانی ارتباط با سرویس ایمیل به پایان رسید."
+      : toPersianErrorMessage(err, "خطا در برقراری ارتباط با سرویس ایمیل.");
     return { ok: false, error: message };
   } finally {
     if (timer) clearTimeout(timer);

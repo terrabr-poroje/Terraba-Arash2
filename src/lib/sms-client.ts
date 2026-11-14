@@ -1,6 +1,7 @@
 /**
  * Client-side helper for invoking the sms.ir OTP and Cloudflare D1 registration endpoints
  */
+import { toPersianErrorMessage } from "./error-messages";
 
 export interface VerifyOtpParams {
   mobile: string;
@@ -50,18 +51,21 @@ export async function requestSmsOtp(mobile: string): Promise<{ success: boolean;
       signal: controller?.signal,
     });
     const data = (await res.json().catch(() => ({}))) as { success?: boolean; message?: string };
+    const success = Boolean(res.ok && data.success);
     return {
-      success: !!data.success,
-      message: data.message || (res.ok ? "کد یک‌بارمصرف پیامک شد." : "خطا در ارسال پیامک"),
+      success,
+      message: success
+        ? data.message || "کد یک‌بارمصرف پیامک شد."
+        : toPersianErrorMessage(data.message, "خطا در ارسال پیامک تأیید. لطفاً دوباره تلاش کنید."),
     };
   } catch (err) {
     console.error("[requestSmsOtp error]", err);
     return {
       success: false,
-      message:
-        err instanceof Error && err.name === "AbortError"
-          ? "پاسخ‌گویی سرور پیامک طولانی شد. لطفاً دوباره تلاش کنید."
-          : "خطا در اتصال به سرور جهت ارسال پیامک. لطفاً دوباره تلاش کنید.",
+      message: toPersianErrorMessage(
+        err,
+        "خطا در اتصال به سرور جهت ارسال پیامک. لطفاً دوباره تلاش کنید.",
+      ),
     };
   } finally {
     if (timer) clearTimeout(timer);
@@ -98,9 +102,12 @@ export async function submitVerifySmsOtp(
       window.dispatchEvent(new CustomEvent("terrabar-auth-change", { detail: sessionData }));
     }
 
+    const success = Boolean(res.ok && data.success);
     return {
-      success: !!data.success,
-      message: data.message || (res.ok ? "ورود با موفقیت انجام شد." : "کد نامعتبر است."),
+      success,
+      message: success
+        ? data.message || "ورود با موفقیت انجام شد."
+        : toPersianErrorMessage(data.message, "کد نامعتبر است یا ورود انجام نشد."),
       user: data.user,
       member: data.member,
       roles: data.roles,
@@ -110,7 +117,7 @@ export async function submitVerifySmsOtp(
     console.error("[submitVerifySmsOtp error]", err);
     return {
       success: false,
-      message: "خطا در ارتباط با سرور جهت تأیید کد و ثبت‌نام.",
+      message: toPersianErrorMessage(err, "خطا در ارتباط با سرور جهت تأیید کد و ثبت‌نام."),
     };
   }
 }

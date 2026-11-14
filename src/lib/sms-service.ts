@@ -5,6 +5,7 @@
  */
 
 import { getEnvVar } from "./runtime-env";
+import { toPersianErrorMessage } from "./error-messages";
 
 export type SmsLogPayload = {
   recipient: string;
@@ -130,10 +131,11 @@ async function sendToSmsIrVerify(
     };
   } catch (err: unknown) {
     const isTimeout = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
-    const errorMsg = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
-      message: isTimeout ? "مهلت زمانی ارتباط با سرویس پیامک به پایان رسید." : errorMsg,
+      message: isTimeout
+        ? "مهلت زمانی ارتباط با سرویس پیامک به پایان رسید."
+        : toPersianErrorMessage(err, "خطا در برقراری ارتباط با سرویس پیامکی."),
     };
   } finally {
     if (timer) clearTimeout(timer);
@@ -206,7 +208,10 @@ export async function sendOtpSms(
   if (!dispatchResult.ok) {
     return {
       success: false,
-      message: dispatchResult.message || "خطا در ارسال پیامک تأیید. لطفاً تنظیمات سرویس پیامکی را بررسی کنید.",
+      message: toPersianErrorMessage(
+        dispatchResult.message,
+        "خطا در ارسال پیامک تأیید. لطفاً تنظیمات سرویس پیامکی را بررسی کنید.",
+      ),
     };
   }
 
@@ -312,7 +317,7 @@ export async function sendEventNotificationSms(params: {
   }
 
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), 10000) : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 4500) : null;
   try {
     const response = await fetch("https://api.sms.ir/v1/send/bulk", {
       method: "POST",
@@ -335,6 +340,9 @@ export async function sendEventNotificationSms(params: {
     };
 
     const ok = response.ok && (result.status === 1 || result.status === 200 || result.status === 0);
+    const localizedErr = ok
+      ? undefined
+      : toPersianErrorMessage(result.message, `خطا در ارسال پیامک (کد ${response.status})`);
 
     await recordSmsLog({
       recipient: mobile,
@@ -343,13 +351,13 @@ export async function sendEventNotificationSms(params: {
       messageSummary: params.messageText,
       status: ok ? "sent" : "failed",
       providerStatus: typeof result.status !== "undefined" ? String(result.status) : String(response.status),
-      errorMessage: ok ? undefined : result.message || `HTTP ${response.status}`,
+      errorMessage: localizedErr,
       relatedId: params.relatedId,
     });
 
-    return ok ? { ok: true } : { ok: false, error: result.message };
+    return ok ? { ok: true } : { ok: false, error: localizedErr };
   } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : String(err);
+    const errMsg = toPersianErrorMessage(err, "خطا در برقراری ارتباط با سرویس پیامکی.");
     await recordSmsLog({
       recipient: mobile,
       channel: "sms",

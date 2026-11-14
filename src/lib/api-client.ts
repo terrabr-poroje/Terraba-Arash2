@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { toPersianErrorMessage } from "./error-messages";
 
 export function getSessionToken(): string {
   if (typeof window === "undefined") return "";
@@ -51,14 +52,33 @@ export async function apiFetch<T = any>(
       cache: "no-store",
     });
 
-    const data = (await res.json().catch(() => ({}))) as T;
-    return { ok: res.ok, status: res.status, data };
+    const data = (await res.json().catch(() => ({}))) as any;
+    if (!res.ok || data?.success === false) {
+      const normalizedMsg = toPersianErrorMessage(
+        data?.message || data?.error,
+        res.status === 403
+          ? "شما دسترسی مجاز برای انجام این عملیات را ندارید."
+          : res.status === 401
+            ? "نشست کاربری شما منقضی شده است. لطفاً مجدداً وارد شوید."
+            : res.status >= 500
+              ? "خطای داخلی سرور در پردازش درخواست. لطفاً دوباره تلاش کنید."
+              : "انجام درخواست با خطا مواجه شد. لطفاً دوباره تلاش کنید.",
+      );
+      if (data && typeof data === "object") {
+        data.message = normalizedMsg;
+        if (data.error) data.error = normalizedMsg;
+      }
+    }
+    return { ok: res.ok, status: res.status, data: data as T };
   } catch (err) {
     console.warn("[apiFetch] network error:", path, err);
     return {
       ok: false,
       status: 0,
-      data: { success: false, message: "خطا در برقراری ارتباط با سرور. لطفاً دوباره تلاش کنید." } as T,
+      data: {
+        success: false,
+        message: toPersianErrorMessage(err, "خطا در برقراری ارتباط با سرور. لطفاً دوباره تلاش کنید."),
+      } as T,
     };
   }
 }
