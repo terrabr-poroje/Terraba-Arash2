@@ -8,45 +8,30 @@
   Content-Type: application/javascript; charset=utf-8
   Cache-Control: no-cache, no-store, must-revalidate
 
-/assets/*
-  Cache-Control: public, max-age=31536000, immutable
-
 /assets/*.js
   Content-Type: application/javascript; charset=utf-8
-  Cache-Control: public, max-age=31536000, immutable
 
 /assets/*.css
   Content-Type: text/css; charset=utf-8
-  Cache-Control: public, max-age=31536000, immutable
 
 /api/*
-  Access-Control-Allow-Origin: *
   Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS
   Access-Control-Allow-Headers: Content-Type, Authorization, Range, X-Requested-With, Accept
   Cache-Control: no-store, no-cache, must-revalidate
 
 /fonts/*
   Cache-Control: public, max-age=31536000, immutable
-  Access-Control-Allow-Origin: *
   Cross-Origin-Resource-Policy: cross-origin
   Timing-Allow-Origin: *
 
 /fonts/*.woff2
   Content-Type: font/woff2
-  Cache-Control: public, max-age=31536000, immutable
-  Access-Control-Allow-Origin: *
-  Cross-Origin-Resource-Policy: cross-origin
+
+/fonts/*.woff
+  Content-Type: font/woff
 
 /fonts/*.ttf
   Content-Type: font/ttf
-  Cache-Control: public, max-age=31536000, immutable
-  Access-Control-Allow-Origin: *
-  Cross-Origin-Resource-Policy: cross-origin
-
-/*.woff2
-  Content-Type: font/woff2
-  Cache-Control: public, max-age=31536000, immutable
-  Access-Control-Allow-Origin: *
 
 /favicon.svg
   Content-Type: image/svg+xml
@@ -67,9 +52,3 @@
 /robots.txt
   Content-Type: text/plain; charset=utf-8
   Cache-Control: public, max-age=3600
-
-/*.png
-  Cache-Control: public, max-age=2592000, stale-while-revalidate=86400
-
-/*.webp
-  Cache-Control: public, max-age=2592000, stale-while-revalidate=86400

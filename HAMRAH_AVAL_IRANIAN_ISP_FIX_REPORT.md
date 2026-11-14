@@ -79,10 +79,10 @@
 
 1. **استفاده از Custom Domain به جای آدرس `*.workers.dev`:**
    - زیردامنه‌های `workers.dev` در بسیاری از رنج‌های IP و DNS همراه اول دچار اختلال یا محدودیت هستند. حتماً سایت را روی دامنه اصلی خود (با رکورد Proxied یا Custom Domain متصل به Worker) باز کنید.
-2. **خاموش کردن HTTP/3 (with QUIC) در کلودفلر (مهم‌ترین مورد شبکه همراه اول):**
-   - مسیر: `Cloudflare Dashboard -> Speed -> Optimization -> Protocol Optimization` (یا بخش `Network`)
-   - گزینه **HTTP/3 (with QUIC)** را روی **Off** قرار دهید.
-   - *دلیل:* همراه اول در بسیاری از دکل‌های موبایل بسته‌های UDP روی پورت 443 (مورد نیاز QUIC/HTTP3) را دراپ می‌کند؛ در نتیجه مرورگر موبایل چند ثانیه در حالت «در حال اتصال» قفل می‌شود، در حالی که ایرانسل بسته‌های UDP/443 را عبور می‌دهد. با خاموش کردن HTTP/3، تمام مرورگرها فوراً با HTTP/2 (TCP/443) باز می‌شوند.
+2. **بررسی HTTP/3 (with QUIC) در کلودفلر بر اساس مقایسه با `mgas.ir`:**
+   - بررسی مستقیم هدرهای پاسخ زنده دو دامنه نشان داد که روی **`mgas.ir`** (که روی موبایل بدون مشکل باز می‌شود) هدر `alt-svc: h3=":443"; ma=86400` فعال است (**HTTP/3 روشن**) و تمام فایل‌ها با هدرهای تک‌مقداره و تمیز سرو می‌شوند، در حالی که روی **`terrabar.ir`** هدر `alt-svc` وجود ندارد (**HTTP/3 خاموش**) و تمام ۸ درخواست فرعی روی یک اتصال TCP/HTTP2 مشترک در موبایل همزمان پس از ۳۷.۲ ثانیه Timeout شده‌اند.
+   - مسیر بررسی: `Cloudflare Dashboard -> Speed -> Optimization -> Protocol Optimization` (یا بخش `Network -> HTTP/3 (with QUIC)`).
+   - **توصیه عملی:** با توجه به عملکرد موفق `mgas.ir`، ابتدا مطمئن شوید کد جدید (به‌خصوص اصلاحیه `public/_headers`، تجمیع چانک‌ها و `src/server.ts`) روی Cloudflare Deploy شده باشد، سپس تنظیمات **HTTP/3 (with QUIC)** را هم‌تراز با تنظیمات دامنه `mgas.ir` قرار دهید (در صورت وجود اختلال روی اپراتور خاص می‌توان آن را به‌صورت آزمایشی روشن/خاموش و بلافاصله روی همان سیم‌کارت تست کرد).
 3. **بررسی TLS 1.3 و Encrypted ClientHello (ECH):**
    - مسیر: `SSL/TLS -> Edge Certificates`
    - اگر روی همراه اول اتصال در مرحله SSL Handshake قطع می‌شود، گزینه **Encrypted ClientHello (ECH)** (در صورت نمایش در پلن شما) را **Off** کنید. حالت `Minimum TLS Version` روی `TLS 1.2` باقی بماند.
@@ -95,12 +95,31 @@
 
 ---
 
-## ۴. فایل‌های ایجاد و به‌روزرسانی شده در این اصلاحیه
+## ۴. تحلیل دقیق اسکرین‌شات کنسول مرورگر موبایل (Firefox Android - MobiDevTools)
 
-- `vite.config.ts`: تجمیع چانک‌های کلاینت (`lucide-icons`, `react-vendor`, `tanstack-vendor`, `ui-vendor`, `charts-vendor`) و هدف بیلد `es2015 / safari11`.
-- `src/server.ts`: بافر کامل SSR HTML با `Content-Length` دقیق، حذف هدرهای `Link` preload اضافی، پاسخ `OPTIONS 204`، هدرهای امنیتی و `no-store` برای `/sw.js`.
+بررسی لاگ Network و Console ارسالی از صفحه `https://terrabar.ir/auth` و مقایسه با هدرهای زنده سرور، ۳ یافته قطعی را آشکار کرد:
+
+1. **خطای هم‌پوشانی قواعد در `public/_headers` (علت اصلی هدرهای تکراری در Cloudflare Static Assets):**
+   - لبه Cloudflare Workers Assets مقادیر قوانین منطبق در `_headers` را جایگزین نمی‌کند بلکه **به هم می‌چسباند (Append)**.
+   - در نسخه قبلی، فایل فونت `Vazirmatn-Variable.woff2` همزمان با ۴ الگو (`/*`, `/fonts/*`, `/fonts/*.woff2`, `/*.woff2`) مطابقت داشت و هدرهای معیوب زیر را تولید می‌کرد:
+     - `access-control-allow-origin: *, *, *, *` (طبق استاندارد CORS چند مقدار `*` نامعتبر است و Preload فونت با `crossorigin="anonymous"` را خراب می‌کند)
+     - `content-type: font/woff2, font/woff2`
+     - `cache-control: public, max-age=31536000, immutable` (۳ بار تکرار شده؛ چون نیترو هم `/assets/*` را در انتها اضافه می‌کند)
+   - در نسخه جدید، تمام هم‌پوشانی‌ها از `public/_headers` حذف شد تا هر هدر (`Access-Control-Allow-Origin: *`، `Content-Type`، `Cache-Control`، `Cross-Origin-Resource-Policy`) دقیقاً **یک‌بار** صادر شود.
+2. **کاهش تعداد درخواست‌های JS همزمان در `/auth` از ۷ فایل به ۲ فایل:**
+   - در اسکرین‌شات موبایل، پس از دریافت HTML صفحه `/auth`، مرورگر ناچار به باز کردن همزمان **۸ استریم موازی** (`index`, `rolldown-runtime` ۳۵۴ بایتی، `lucide-icons`, `react-vendor`, `auth`, `city-picker` ۱.۲ کیلوبایتی، `email-client` ۱.۳ کیلوبایتی و فونت `Vazirmatn`) بود که هر ۸ استریم در تایم‌اوت ۳۷.۲ ثانیه قطع شدند.
+   - با تجمیع ماژول‌های مشترک کوچک و کتابخانه‌های پایه در `vite.config.ts`، تعداد چانک‌های JS موردنیاز صفحه `/auth` به **فقط ۲ فایل** (`index` و `auth`) کاهش یافت و کل دارایی‌های پوشه `assets` به **۳۸ فایل** رسید.
+3. **نسخه مستقر روی Cloudflare هنوز آخرین تغییرات `src/server.ts` را دریافت نکرده بود:**
+   - بررسی زنده `https://terrabar.ir/auth` نشان داد سرور هنوز هدر قدیمی `cache-control: no-store, no-cache, must-revalidate` را بدون `Content-Length` برمی‌گرداند. پس از Push و Deploy این نسخه جدید، پاسخ‌های HTML با `Content-Length` دقیق و `Cache-Control: public, max-age=0, must-revalidate` از Worker سرو می‌شوند.
+
+---
+
+## ۵. فایل‌های ایجاد و به‌روزرسانی شده در این اصلاحیه
+
+- `vite.config.ts`: تجمیع چانک‌های کلاینت (`react-vendor`, `app-core`, `charts-vendor`)، کاهش چانک‌های ریز به ۳۸ فایل کل، و هدف بیلد `es2015 / safari11`.
+- `src/server.ts` و `src/lib/http-compression.ts`: بافر کامل SSR HTML (برای `GET` و `HEAD`) با `Content-Length` دقیق و `Vary: Accept-Encoding` تمیز، حذف هدرهای `Link` preload اضافی، پاسخ `OPTIONS 204` و CORS یکپارچه.
+- `public/_headers` و `public/sw.js`: حذف کامل هدرهای تکراری در Cloudflare Static Assets و پاکسازی سرویس‌ورکرهای قدیمی.
 - `src/lib/safe-storage.ts`: لایه ایمن `localStorage`/`sessionStorage` با حافظه موقت + تخلیه SW و ریکاوری خطای چانک.
 - `src/lib/browser-polyfills.ts` و `scripts/prepare-dist.mjs`: شیم همزمان حافظه در `<head>` و پلی‌فیل‌های سازگاری WebKit/Android.
-- `src/components/error-boundary.tsx` و `src/routes/__root.tsx`: محافظ رندر با دکمه بارگذاری مجدد فارسی و نصب هوک بازیابی چانک.
+- `src/components/error-boundary.tsx` و `src/routes/__root.tsx`: محافظ رندر با دکمه بارگذاری مجدد فارسی، Preload فونت محلی `Vazirmatn-Variable.woff2` و نصب هوک بازیابی چانک.
 - `src/lib/auth.ts`, `src/lib/api-client.ts`, `src/lib/sms-client.ts`, `src/lib/email-client.ts`, `src/lib/storage-client.ts`, `src/lib/theme.ts`: استفاده سراسری از `safeStorage`.
-- `public/sw.js` و `public/_headers`: پاکسازی سرویس‌ورکرهای مزاحم و هدرهای استاتیک لبه کلودفلر.

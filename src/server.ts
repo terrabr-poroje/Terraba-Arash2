@@ -212,12 +212,17 @@ export default {
       // Buffer SSR HTML as clean UTF-8 with exact Content-Length (without no-transform),
       // so Cloudflare Edge applies Brotli/Gzip cleanly and proxies never misrender raw binary.
       const contentType = (responseHeaders.get("content-type") ?? "").toLowerCase();
-      if (contentType.includes("text/html") && request.method.toUpperCase() !== "HEAD") {
-        const htmlText = await normalized.text();
-        const htmlBytes = new TextEncoder().encode(htmlText);
+      if (contentType.includes("text/html")) {
         responseHeaders.delete("link");
         responseHeaders.set("Content-Type", "text/html; charset=utf-8");
         responseHeaders.set("Cache-Control", "public, max-age=0, must-revalidate");
+        if (request.method.toUpperCase() === "HEAD") {
+          responseHeaders.delete("content-encoding");
+          appendVaryHeader(responseHeaders, "Accept-Encoding");
+          return new Response(null, { status: normalized.status, headers: responseHeaders });
+        }
+        const htmlText = await normalized.text();
+        const htmlBytes = new TextEncoder().encode(htmlText);
         return buildSafeBufferedResponse(htmlBytes, normalized.status, responseHeaders, request);
       }
 
