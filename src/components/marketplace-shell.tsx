@@ -57,12 +57,14 @@ export function MarketplaceShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     let active = true;
     async function loadMemberMenuRoles() {
-      setRoleLookupDone(false);
       if (!user) {
         setRoleCodes([]);
         setRoleLookupDone(true);
         return;
       }
+      // Populate immediately from cached session roles so mobile Safari menu never blocks
+      setRoleCodes(roles.map((r) => String(r).toLowerCase()));
+      setRoleLookupDone(true);
       try {
         const { ok, data } = await apiGet<{ requests?: any[] }>("/api/membership/my-requests");
         if (!active) return;
@@ -70,14 +72,12 @@ export function MarketplaceShell({ children }: { children: ReactNode }) {
           const approved = data.requests
             .filter((r) => String(r.approval_status || "").toLowerCase() === "approved")
             .map((r) => String(r.role_code || "").toLowerCase());
-          setRoleCodes(approved);
-        } else {
-          setRoleCodes(roles.map((r) => String(r).toLowerCase()));
+          if (approved.length > 0) {
+            setRoleCodes((prev) => Array.from(new Set([...prev, ...approved])));
+          }
         }
       } catch {
-        if (active) setRoleCodes(roles.map((r) => String(r).toLowerCase()));
-      } finally {
-        if (active) setRoleLookupDone(true);
+        // Keep session roles
       }
     }
     void loadMemberMenuRoles();
@@ -237,7 +237,7 @@ export function MarketplaceShell({ children }: { children: ReactNode }) {
       {["/requests", "/cart", "/account"].includes(pathname) && (
         <nav
           aria-label="ناوبری خرید ترابار"
-          className="fixed inset-x-0 bottom-0 z-50 border-t border-border bg-background/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-4px_16px_rgba(0,0,0,0.06)] backdrop-blur"
+          className="fixed inset-x-0 bottom-0 z-50 border-t border-border bg-background pb-[env(safe-area-inset-bottom)] shadow-[0_-4px_16px_rgba(0,0,0,0.06)]"
         >
           <div className="site-container grid h-14 grid-cols-3">
             <Link

@@ -92,6 +92,14 @@ export default {
                 headers.set("Content-Type", "image/webp");
               }
 
+              // 304/204 responses MUST have a null body in Fetch/Cloudflare Workers; passing assetResponse.body throws and caused 404 on Safari reloads
+              if (assetResponse.status === 304 || assetResponse.status === 204 || assetResponse.status === 205) {
+                return new Response(null, {
+                  status: assetResponse.status,
+                  headers,
+                });
+              }
+
               return new Response(assetResponse.body, {
                 status: assetResponse.status,
                 headers,
@@ -151,10 +159,7 @@ export default {
       responseHeaders.delete("x-frame-options");
       responseHeaders.set("Access-Control-Allow-Origin", "*");
       responseHeaders.set("X-Content-Type-Options", "nosniff");
-
-      if (!responseHeaders.has("Cache-Control")) {
-        responseHeaders.set("Cache-Control", "public, max-age=60, stale-while-revalidate=86400");
-      }
+      responseHeaders.set("Cache-Control", "private, no-cache, no-transform");
 
       return new Response(normalized.body, {
         status: normalized.status,

@@ -91,7 +91,7 @@ export function useAuth() {
 
     async function verifyWithServer() {
       const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-      const timeoutId = controller ? window.setTimeout(() => controller.abort(), 15000) : null;
+      const timeoutId = controller ? window.setTimeout(() => controller.abort(), 6000) : null;
 
       try {
         const stored = localStorage.getItem("terrabar_d1_session");

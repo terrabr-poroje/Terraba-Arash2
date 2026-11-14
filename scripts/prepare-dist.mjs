@@ -104,7 +104,6 @@ const indexHtmlContent = `<!DOCTYPE html>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="alternate icon" href="/favicon.ico" type="image/x-icon" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="preload" href="/fonts/vazirmatn/Vazirmatn-Variable.woff2" as="font" type="font/woff2" crossorigin="anonymous" />
     ${mainCssFile ? `<link rel="stylesheet" href="${mainCssFile}" />` : ""}
     <script>
       (function() {

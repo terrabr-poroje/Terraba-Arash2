@@ -1,372 +1,68 @@
 /**
- * Comprehensive Browser Compatibility Polyfills & Fallbacks
- * Ensures Terrabar runs smoothly on all mobile and desktop browsers:
- * - Safari 11 - 18+ (macOS & iOS WebKit / sealed window.crypto / SecurityError in pushState)
- * - Google Chrome & Chromium (Blink/V8, strict MIME types, iframe/sandbox)
- * - Firefox & Firefox Nightly (Gecko, HMR neutrality, Accept: *\/* handling)
- * - Samsung Internet, Opera, Brave, in-app WebViews (Telegram, Instagram, etc.)
+ * Lightweight Browser Compatibility Polyfills & Guards
+ * Keeps head inline script minimal (~1.8KB) for fast iOS Safari startup while protecting
+ * Safari / WebKit / in-app WebViews from sealed crypto, sandboxed history, or missing APIs.
  */
 
 export const POLYFILL_INLINE_SCRIPT = `
 (function() {
   try {
-    // 1. globalThis polyfill
-    if (typeof globalThis === 'undefined') {
-      if (typeof window !== 'undefined') {
-        window.globalThis = window;
-      } else if (typeof self !== 'undefined') {
-        self.globalThis = self;
-      }
+    if (typeof globalThis === 'undefined' && typeof window !== 'undefined') {
+      window.globalThis = window;
     }
-
-    // 2. Sealed window.crypto & crypto.randomUUID (WebKit / Safari iOS safe)
-    try {
-      if (typeof window !== 'undefined') {
-        var c = window.crypto || window.msCrypto;
-        if (!c) {
-          try {
-            c = {};
-            Object.defineProperty(window, 'crypto', { value: c, writable: true, configurable: true });
-          } catch (e) {}
-        }
-        if (c) {
-          if (!c.getRandomValues) {
-            try {
-              c.getRandomValues = function(arr) {
-                for (var i = 0; i < arr.length; i++) {
-                  arr[i] = Math.floor(Math.random() * 256);
-                }
-                return arr;
-              };
-            } catch (e) {}
-          }
-          if (!c.randomUUID) {
-            var uuidFn = function() {
-              return '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, function(ch) {
-                var n = Number(ch);
-                var rnd = (c && c.getRandomValues) ? c.getRandomValues(new Uint8Array(1))[0] : Math.floor(Math.random() * 256);
-                return (n ^ (rnd & (15 >> (n / 4)))).toString(16);
-              });
-            };
-            try {
-              c.randomUUID = uuidFn;
-            } catch (e) {
-              try {
-                Object.defineProperty(c, 'randomUUID', { value: uuidFn, configurable: true, writable: true });
-              } catch (e2) {}
-            }
-          }
+    if (typeof window !== 'undefined') {
+      var c = window.crypto || window.msCrypto;
+      if (c && !c.randomUUID) {
+        var uuidFn = function() {
+          return '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, function(ch) {
+            var n = Number(ch);
+            var rnd = c.getRandomValues ? c.getRandomValues(new Uint8Array(1))[0] : Math.floor(Math.random() * 256);
+            return (n ^ (rnd & (15 >> (n / 4)))).toString(16);
+          });
+        };
+        try { c.randomUUID = uuidFn; } catch (e) {
+          try { Object.defineProperty(c, 'randomUUID', { value: uuidFn, configurable: true, writable: true }); } catch (e2) {}
         }
       }
-    } catch (e) {}
-
-    // 3. History API safe wrappers (Prevents SecurityError in Safari iOS & sandboxed iframes)
-    try {
-      if (typeof window !== 'undefined' && window.history) {
+      if (window.history) {
         var origPush = window.history.pushState;
         if (typeof origPush === 'function') {
-          window.history.pushState = function(state, title, url) {
-            try {
-              return origPush.apply(window.history, arguments);
-            } catch (err) {
-              // Ignore SecurityError / sandbox restriction in Safari & Firefox
-            }
+          window.history.pushState = function() {
+            try { return origPush.apply(window.history, arguments); } catch (err) {}
           };
         }
         var origReplace = window.history.replaceState;
         if (typeof origReplace === 'function') {
-          window.history.replaceState = function(state, title, url) {
-            try {
-              return origReplace.apply(window.history, arguments);
-            } catch (err) {
-              // Ignore SecurityError / sandbox restriction in Safari & Firefox
-            }
+          window.history.replaceState = function() {
+            try { return origReplace.apply(window.history, arguments); } catch (err) {}
           };
         }
       }
-    } catch (e) {}
-
-    // 4. window.matchMedia safe fallback
-    try {
-      if (typeof window !== 'undefined') {
-        if (!window.matchMedia) {
-          window.matchMedia = function(query) {
-            return {
-              matches: false,
-              media: query,
-              onchange: null,
-              addListener: function() {},
-              removeListener: function() {},
-              addEventListener: function() {},
-              removeEventListener: function() {},
-              dispatchEvent: function() { return false; }
-            };
-          };
-        }
-      }
-    } catch (e) {}
-
-    // 5. structuredClone fallback
-    if (typeof window !== 'undefined' && typeof window.structuredClone !== 'function') {
-      window.structuredClone = function(obj) {
-        if (obj === undefined) return undefined;
-        try {
-          return JSON.parse(JSON.stringify(obj));
-        } catch (e) {
-          if (Array.isArray(obj)) return obj.slice();
-          if (obj && typeof obj === 'object') return Object.assign({}, obj);
-          return obj;
-        }
-      };
-    }
-
-    // 6. Promise.allSettled
-    if (typeof Promise !== 'undefined' && !Promise.allSettled) {
-      Promise.allSettled = function(promises) {
-        return Promise.all(
-          Array.from(promises).map(function(promise) {
-            return Promise.resolve(promise).then(
-              function(value) { return { status: 'fulfilled', value: value }; },
-              function(reason) { return { status: 'rejected', reason: reason }; }
-            );
-          })
-        );
-      };
-    }
-
-    // 7. Promise.any
-    if (typeof Promise !== 'undefined' && !Promise.any) {
-      Promise.any = function(promises) {
-        return new Promise(function(resolve, reject) {
-          var arr = Array.from(promises);
-          var errors = [];
-          var count = 0;
-          if (arr.length === 0) {
-            reject(new Error('All promises were rejected'));
-            return;
-          }
-          arr.forEach(function(promise) {
-            Promise.resolve(promise).then(resolve).catch(function(err) {
-              errors.push(err);
-              count++;
-              if (count === arr.length) {
-                reject(new Error('All promises were rejected: ' + errors.join(', ')));
-              }
-            });
-          });
-        });
-      };
-    }
-
-    // 8. Array.prototype.flat & flatMap
-    if (!Array.prototype.flat) {
-      Array.prototype.flat = function(depth) {
-        var d = typeof depth === 'number' ? depth : 1;
-        function flatten(arr, cur) {
-          return arr.reduce(function(acc, val) {
-            return acc.concat(Array.isArray(val) && cur < d ? flatten(val, cur + 1) : val);
-          }, []);
-        }
-        return flatten(this, 0);
-      };
-    }
-    if (!Array.prototype.flatMap) {
-      Array.prototype.flatMap = function(fn, thisArg) {
-        return this.map(fn, thisArg).flat();
-      };
-    }
-
-    // 9. Array.prototype.at & String.prototype.at
-    if (!Array.prototype.at) {
-      Array.prototype.at = function(index) {
-        var idx = Math.trunc(index) || 0;
-        if (idx < 0) idx += this.length;
-        if (idx < 0 || idx >= this.length) return undefined;
-        return this[idx];
-      };
-    }
-    if (!String.prototype.at) {
-      String.prototype.at = function(index) {
-        var idx = Math.trunc(index) || 0;
-        if (idx < 0) idx += this.length;
-        if (idx < 0 || idx >= this.length) return '';
-        return this.charAt(idx);
-      };
-    }
-
-    // 10. Object.fromEntries & Object.hasOwn
-    if (!Object.fromEntries) {
-      Object.fromEntries = function(entries) {
-        if (!entries || !entries[Symbol.iterator]) return {};
-        var obj = {};
-        var iterator = entries[Symbol.iterator]();
-        var step;
-        while (!(step = iterator.next()).done) {
-          var pair = step.value;
-          if (Object(pair) === pair && pair.length >= 2) {
-            obj[pair[0]] = pair[1];
-          }
-        }
-        return obj;
-      };
-    }
-    if (!Object.hasOwn) {
-      Object.hasOwn = function(object, key) {
-        return Object.prototype.hasOwnProperty.call(object, key);
-      };
-    }
-
-    // 11. String.prototype.replaceAll
-    if (!String.prototype.replaceAll) {
-      String.prototype.replaceAll = function(search, replacement) {
-        if (search instanceof RegExp) {
-          if (!search.global) throw new TypeError('replaceAll must be called with a global RegExp');
-          return this.replace(search, replacement);
-        }
-        return this.split(search).join(replacement);
-      };
-    }
-
-    // 12. queueMicrotask
-    if (typeof window !== 'undefined' && typeof window.queueMicrotask !== 'function') {
-      window.queueMicrotask = function(cb) {
-        Promise.resolve().then(cb).catch(function(err) {
-          setTimeout(function() { throw err; }, 0);
-        });
-      };
-    }
-
-    // 13. requestIdleCallback / cancelIdleCallback (iOS Safari fallback)
-    if (typeof window !== 'undefined') {
       if (!window.requestIdleCallback) {
         window.requestIdleCallback = function(cb) {
           var start = Date.now();
           return setTimeout(function() {
-            cb({
-              didTimeout: false,
-              timeRemaining: function() {
-                return Math.max(0, 50 - (Date.now() - start));
-              }
-            });
+            cb({ didTimeout: false, timeRemaining: function() { return Math.max(0, 50 - (Date.now() - start)); } });
           }, 1);
         };
       }
       if (!window.cancelIdleCallback) {
-        window.cancelIdleCallback = function(id) {
-          clearTimeout(id);
-        };
+        window.cancelIdleCallback = function(id) { clearTimeout(id); };
       }
-    }
-
-    // 14. ResizeObserver safe fallback
-    if (typeof window !== 'undefined' && typeof window.ResizeObserver === 'undefined') {
-      window.ResizeObserver = function() {
-        this.observe = function() {};
-        this.unobserve = function() {};
-        this.disconnect = function() {};
-      };
-    }
-
-    // 15. IntersectionObserver safe fallback
-    if (typeof window !== 'undefined' && typeof window.IntersectionObserver === 'undefined') {
-      window.IntersectionObserver = function(callback) {
-        this.observe = function(element) {
-          try {
-            callback([{
-              isIntersecting: true,
-              target: element,
-              intersectionRatio: 1,
-              boundingClientRect: element.getBoundingClientRect ? element.getBoundingClientRect() : {},
-              intersectionRect: element.getBoundingClientRect ? element.getBoundingClientRect() : {},
-              rootBounds: null,
-              time: Date.now()
-            }], this);
-          } catch(e) {}
-        };
-        this.unobserve = function() {};
-        this.disconnect = function() {};
-      };
-    }
-
-    // 16. Element.prototype.replaceChildren
-    if (typeof Element !== 'undefined' && !Element.prototype.replaceChildren) {
-      Element.prototype.replaceChildren = function() {
-        while (this.firstChild) {
-          this.removeChild(this.firstChild);
-        }
-        this.append.apply(this, arguments);
-      };
-    }
-
-    // 17. NodeList.prototype.forEach
-    if (typeof NodeList !== 'undefined' && !NodeList.prototype.forEach) {
-      NodeList.prototype.forEach = Array.prototype.forEach;
-    }
-
-    // 18. navigator.clipboard fallback for older browsers / non-HTTPS
-    if (typeof navigator !== 'undefined' && !navigator.clipboard) {
-      navigator.clipboard = {
-        writeText: function(text) {
-          return new Promise(function(resolve, reject) {
-            try {
-              var textArea = document.createElement('textarea');
-              textArea.value = text;
-              textArea.style.position = 'fixed';
-              textArea.style.left = '-9999px';
-              textArea.style.top = '-9999px';
-              textArea.style.opacity = '0';
-              document.body.appendChild(textArea);
-              textArea.focus();
-              textArea.select();
-              var successful = document.execCommand('copy');
-              document.body.removeChild(textArea);
-              if (successful) resolve();
-              else reject(new Error('Copy failed'));
-            } catch (err) {
-              reject(err);
-            }
-          });
-        }
-      };
-    }
-
-    // 19. No direct documentElement DOM mutation before React hydration (prevents React 19 attribute mismatch)
-
-    // 20. Clean up any stale service workers or caches that could lock subsequent loads
-    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-      try {
-        navigator.serviceWorker.getRegistrations().then(function(regs) {
-          if (regs && regs.length) {
-            for (var i = 0; i < regs.length; i++) {
-              try { regs[i].unregister(); } catch(e) {}
-            }
-          }
-        }).catch(function() {});
-      } catch(e) {}
-    }
-
-    // 21. Suppress non-critical uncaught errors (like ResizeObserver loop limits, aborted fetches)
-    if (typeof window !== 'undefined') {
+      if (typeof window.ResizeObserver === 'undefined') {
+        window.ResizeObserver = function() { this.observe = function() {}; this.unobserve = function() {}; this.disconnect = function() {}; };
+      }
       window.addEventListener('unhandledrejection', function(event) {
         if (event && event.reason) {
-          var reasonStr = String(event.reason);
-          if (
-            reasonStr.indexOf('ResizeObserver') !== -1 ||
-            reasonStr.indexOf('SecurityError') !== -1 ||
-            reasonStr.indexOf('Failed to fetch') !== -1 ||
-            reasonStr.indexOf('AbortError') !== -1
-          ) {
+          var s = String(event.reason);
+          if (s.indexOf('ResizeObserver') !== -1 || s.indexOf('SecurityError') !== -1 || s.indexOf('AbortError') !== -1) {
             event.preventDefault();
           }
         }
       });
       window.__terrabar_polyfills_ready__ = true;
     }
-  } catch(e) {
-    if (typeof console !== 'undefined' && console.warn) {
-      console.warn('Browser polyfills initialization notice:', e);
-    }
-  }
+  } catch (e) {}
 })();
 `;
 

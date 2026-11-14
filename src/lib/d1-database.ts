@@ -1211,13 +1211,15 @@ async function resolveUserRolesAndAdmin(
   }
 
   if (memberId) {
+    let roleRowsList: { role_code: string; approval_status: string }[] = [];
     try {
       const roleRows = await db
         .prepare("SELECT role_code, approval_status FROM member_roles WHERE member_id = ?")
         .bind(memberId)
         .all<{ role_code: string; approval_status: string }>();
+      roleRowsList = roleRows.results || [];
 
-      for (const r of roleRows.results || []) {
+      for (const r of roleRowsList) {
         const code = String(r.role_code || "").toLowerCase();
         if (String(r.approval_status || "").toLowerCase() === "approved") {
           const normalized = code === "bar_seller" ? "seller" : code;
@@ -1227,6 +1229,29 @@ async function resolveUserRolesAndAdmin(
       }
     } catch {
       // Ignore role table read failure
+    }
+
+    try {
+      const memberRow = await db
+        .prepare("SELECT role, verification_status FROM members WHERE id = ? LIMIT 1")
+        .bind(memberId)
+        .first<{ role?: string; verification_status?: string }>();
+      if (memberRow && String(memberRow.verification_status || "").toLowerCase() === "approved") {
+        const rawMemberRole = String(memberRow.role || "").toLowerCase();
+        const normalizedMemberRole = rawMemberRole === "bar_seller" ? "seller" : rawMemberRole;
+        const isPro = ["seller", "supplier", "special_buyer", "buyer_special"].includes(normalizedMemberRole);
+        const explicitlyRejected = roleRowsList.some(
+          (r) =>
+            (r.role_code === normalizedMemberRole || r.role_code === rawMemberRole) &&
+            String(r.approval_status || "").toLowerCase() === "rejected",
+        );
+        if (isPro && !explicitlyRejected) {
+          if (!roles.includes(normalizedMemberRole)) roles.push(normalizedMemberRole);
+          if (rawMemberRole === "bar_seller" && !roles.includes("bar_seller")) roles.push("bar_seller");
+        }
+      }
+    } catch {
+      // Ignore member role fallback
     }
   }
 
@@ -1634,6 +1659,17 @@ globalForSessions.__terrabar_session_cache__ = sessionCache;
 function cacheSessionResult(token: string, result: UserAuthResult, expiresAt: number) {
   if (!token) return;
   sessionCache.set(token, { result, expiresAt });
+}
+
+function invalidateSessionCacheForUser(userId?: string | null, memberId?: string | null) {
+  if (!userId && !memberId) return;
+  for (const [tok, entry] of sessionCache.entries()) {
+    const uMatch = userId && entry.result?.user?.id === userId;
+    const mMatch = memberId && entry.result?.member?.id === memberId;
+    if (uMatch || mMatch) {
+      sessionCache.delete(tok);
+    }
+  }
 }
 
 async function saveSessionRecord(
@@ -2205,21 +2241,38 @@ export async function submitMembershipRequest(payload: MembershipRequestPayload)
     let memberId: string;
     if (member) {
       memberId = member.id;
-      await db
-        .prepare(
-          "UPDATE members SET full_name = ?, phone = COALESCE(NULLIF(?, ''), phone), city = ?, province = ?, products = COALESCE(NULLIF(?, ''), products), updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-        )
-        .bind(fullName, phone, city, province, description, memberId)
-        .run();
+      await runWithSchemaRepair(() =>
+        db
+          .prepare(
+            "UPDATE members SET full_name = ?, phone = COALESCE(NULLIF(?, ''), phone), city = ?, province = ?, products = COALESCE(NULLIF(?, ''), products), is_active = 1, is_archived = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          )
+          .bind(fullName, phone, city, province, description, memberId)
+          .run(),
+      );
     } else {
+      const userRow = payload.userId
+        ? await db.prepare("SELECT email FROM users WHERE id = ? LIMIT 1").bind(payload.userId).first<{ email?: string }>()
+        : null;
       memberId = generateId("mem");
-      await db
-        .prepare(
-          `INSERT INTO members (id, auth_user_id, full_name, phone, city, province, role, verification_status, products, is_active, is_archived, joined_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        )
-        .bind(memberId, payload.userId || generateId("usr"), fullName, phone, city, province, roleCode, description)
-        .run();
+      await runWithSchemaRepair(() =>
+        db
+          .prepare(
+            `INSERT INTO members (id, auth_user_id, full_name, phone, email, city, province, role, verification_status, products, is_active, is_archived, joined_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          )
+          .bind(
+            memberId,
+            payload.userId || generateId("usr"),
+            fullName,
+            phone,
+            userRow?.email || null,
+            city,
+            province,
+            roleCode,
+            description,
+          )
+          .run(),
+      );
     }
 
     const roleTitle =
@@ -2298,72 +2351,257 @@ export async function updateRoleApprovalStatus(
   roleId: string,
   status: "approved" | "rejected",
   actorUserId = "admin_user_main",
-): Promise<boolean> {
+  options?: { memberId?: string; roleCode?: string },
+): Promise<{
+  success: boolean;
+  error?: string;
+  member?: any;
+  roleRequest?: any;
+}> {
   try {
     await initD1Schema();
     const db = getD1();
-    const targetRole = await runWithSchemaRepair(() =>
-      db
-        .prepare(
-          "SELECT mr.*, m.phone, m.email, m.full_name, m.role as member_role FROM member_roles mr LEFT JOIN members m ON mr.member_id = m.id WHERE mr.id = ? OR mr.member_id = ? LIMIT 1",
-        )
-        .bind(roleId, roleId)
-        .first<any>(),
-    );
+    const cleanRoleId = (roleId || "").trim();
+    const cleanMemberIdHint = (options?.memberId || "").trim();
+    const cleanRoleCodeHint = (options?.roleCode || "").trim().toLowerCase();
 
-    let updated = false;
-    if (targetRole) {
-      const res = await runWithSchemaRepair(() =>
-        db
-          .prepare(
-            "UPDATE member_roles SET approval_status = ?, approved_at = CURRENT_TIMESTAMP, approved_by = ? WHERE id = ? OR member_id = ?",
-          )
-          .bind(status, actorUserId, roleId, roleId)
-          .run(),
-      );
-      updated = Boolean(res.success);
-    } else {
-      const orphanMember = await db
-        .prepare("SELECT * FROM members WHERE id = ? LIMIT 1")
-        .bind(roleId)
-        .first<any>();
-      if (orphanMember) {
-        const res = await runWithSchemaRepair(() =>
+    let targetRole = cleanRoleId
+      ? await runWithSchemaRepair(() =>
           db
             .prepare(
-              "INSERT INTO member_roles (id, member_id, role_code, approval_status, request_note, approved_at, approved_by, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)",
+              "SELECT mr.*, m.phone, m.email, m.full_name, m.role as member_role, m.auth_user_id FROM member_roles mr LEFT JOIN members m ON mr.member_id = m.id WHERE mr.id = ? LIMIT 1",
+            )
+            .bind(cleanRoleId)
+            .first<any>(),
+        )
+      : null;
+
+    if (!targetRole && (cleanRoleId || cleanMemberIdHint)) {
+      const lookupMemberId = cleanMemberIdHint || cleanRoleId;
+      targetRole = await runWithSchemaRepair(() =>
+        db
+          .prepare(
+            "SELECT mr.*, m.phone, m.email, m.full_name, m.role as member_role, m.auth_user_id FROM member_roles mr LEFT JOIN members m ON mr.member_id = m.id WHERE mr.member_id = ? ORDER BY CASE WHEN mr.approval_status = 'pending' THEN 0 ELSE 1 END, mr.created_at DESC LIMIT 1",
+          )
+          .bind(lookupMemberId)
+          .first<any>(),
+      );
+    }
+
+    let resolvedMember: any = null;
+    if (targetRole?.member_id) {
+      resolvedMember = await db
+        .prepare("SELECT * FROM members WHERE id = ? LIMIT 1")
+        .bind(targetRole.member_id)
+        .first<any>();
+    }
+
+    if (!resolvedMember) {
+      const candidateIds = [cleanMemberIdHint, cleanRoleId].filter(Boolean);
+      for (const cid of candidateIds) {
+        resolvedMember = await db
+          .prepare("SELECT * FROM members WHERE id = ? OR auth_user_id = ? LIMIT 1")
+          .bind(cid, cid)
+          .first<any>();
+        if (resolvedMember) break;
+      }
+    }
+
+    // Fallback: if user existed in users table without a members row, synthesize & persist members row now
+    if (!resolvedMember) {
+      const candidateIds = [cleanMemberIdHint, cleanRoleId].filter(Boolean);
+      for (const cid of candidateIds) {
+        const cleanUid = cid.startsWith("mem_") ? cid.slice(4) : cid;
+        const userRow = await db
+          .prepare("SELECT * FROM users WHERE id = ? OR id = ? LIMIT 1")
+          .bind(cid, cleanUid)
+          .first<any>();
+        if (userRow) {
+          const newMemberId = generateId("mem");
+          const normalizedUserRole =
+            String(userRow.role || cleanRoleCodeHint || "buyer").toLowerCase() === "bar_seller"
+              ? "seller"
+              : String(userRow.role || cleanRoleCodeHint || "buyer").toLowerCase();
+          await runWithSchemaRepair(() =>
+            db
+              .prepare(
+                `INSERT INTO members (id, auth_user_id, full_name, phone, email, city, province, role, verification_status, products, is_active, is_archived, joined_at, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+              )
+              .bind(
+                newMemberId,
+                userRow.id,
+                userRow.full_name || "کاربر ترابار",
+                userRow.phone || null,
+                userRow.email || null,
+                userRow.city || "",
+                userRow.province || "",
+                normalizedUserRole,
+                status,
+                userRow.activity || "",
+              )
+              .run(),
+          );
+          resolvedMember = await db
+            .prepare("SELECT * FROM members WHERE id = ? LIMIT 1")
+            .bind(newMemberId)
+            .first<any>();
+          break;
+        }
+      }
+    }
+
+    if (!targetRole && !resolvedMember) {
+      return {
+        success: false,
+        error: "درخواست یا پرونده کاربری با این شناسه در پایگاه داده یافت نشد.",
+      };
+    }
+
+    const effectiveMemberId = targetRole?.member_id || resolvedMember?.id || cleanMemberIdHint || cleanRoleId;
+    const rawRoleCode = String(
+      targetRole?.role_code || cleanRoleCodeHint || resolvedMember?.role || "buyer",
+    ).toLowerCase();
+    const effectiveRoleCode = rawRoleCode === "bar_seller" ? "seller" : rawRoleCode;
+    const nowIso = new Date().toISOString();
+
+    let roleUpdated = false;
+    let effectiveRoleId = targetRole?.id || "";
+
+    if (targetRole) {
+      try {
+        await runWithSchemaRepair(() =>
+          db
+            .prepare(
+              "UPDATE member_roles SET approval_status = ?, approved_at = ?, approved_by = ? WHERE id = ?",
+            )
+            .bind(status, status === "approved" ? nowIso : null, actorUserId, targetRole.id)
+            .run(),
+        );
+        roleUpdated = true;
+      } catch {
+        try {
+          await db
+            .prepare("UPDATE member_roles SET approval_status = ?, approved_at = ? WHERE id = ?")
+            .bind(status, status === "approved" ? nowIso : null, targetRole.id)
+            .run();
+          roleUpdated = true;
+        } catch {
+          await db
+            .prepare("UPDATE member_roles SET approval_status = ? WHERE id = ?")
+            .bind(status, targetRole.id)
+            .run();
+          roleUpdated = true;
+        }
+      }
+    } else if (resolvedMember) {
+      effectiveRoleId = generateId("role");
+      try {
+        await runWithSchemaRepair(() =>
+          db
+            .prepare(
+              "INSERT INTO member_roles (id, member_id, role_code, approval_status, request_note, approved_at, approved_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
             )
             .bind(
-              generateId("role"),
-              orphanMember.id,
-              orphanMember.role || "buyer",
+              effectiveRoleId,
+              resolvedMember.id,
+              effectiveRoleCode,
               status,
-              orphanMember.products || "درخواست عضویت",
+              resolvedMember.products || "درخواست عضویت",
+              status === "approved" ? nowIso : null,
               actorUserId,
             )
             .run(),
         );
-        updated = Boolean(res.success);
+        roleUpdated = true;
+      } catch {
+        await db
+          .prepare(
+            "INSERT INTO member_roles (id, member_id, role_code, approval_status, request_note, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+          )
+          .bind(
+            effectiveRoleId,
+            resolvedMember.id,
+            effectiveRoleCode,
+            status,
+            resolvedMember.products || "درخواست عضویت",
+          )
+          .run();
+        roleUpdated = true;
       }
     }
 
-    const memberId = targetRole?.member_id || roleId;
-    if (status === "approved") {
-      await runWithSchemaRepair(() =>
-        db
+    if (resolvedMember || effectiveMemberId) {
+      const currentMemberRole = String(resolvedMember?.role || "").toLowerCase();
+      const shouldPromoteRole =
+        status === "approved" &&
+        ["seller", "supplier", "special_buyer"].includes(effectiveRoleCode) &&
+        (!currentMemberRole || currentMemberRole === "buyer" || currentMemberRole === "bar_seller");
+      const nextMemberRole = shouldPromoteRole ? effectiveRoleCode : resolvedMember?.role || effectiveRoleCode;
+
+      if (status === "approved") {
+        await runWithSchemaRepair(() =>
+          db
+            .prepare(
+              "UPDATE members SET verification_status = 'approved', role = COALESCE(NULLIF(?, ''), role), is_active = 1, is_archived = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            )
+            .bind(nextMemberRole, effectiveMemberId)
+            .run(),
+        );
+        if (resolvedMember?.auth_user_id) {
+          await runWithSchemaRepair(() =>
+            db
+              .prepare(
+                "UPDATE users SET role = COALESCE(NULLIF(?, ''), role), is_verified = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+              )
+              .bind(nextMemberRole, resolvedMember.auth_user_id)
+              .run(),
+          );
+        }
+      } else {
+        // Only mark member as rejected if they have no other approved roles
+        const otherApproved = await db
           .prepare(
-            "UPDATE members SET verification_status = 'approved', is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "SELECT id FROM member_roles WHERE member_id = ? AND approval_status = 'approved' AND id != ? LIMIT 1",
           )
-          .bind(memberId)
-          .run(),
-      );
-    } else {
-      await runWithSchemaRepair(() =>
-        db
-          .prepare("UPDATE members SET verification_status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-          .bind(memberId)
-          .run(),
-      );
+          .bind(effectiveMemberId, effectiveRoleId)
+          .first<any>()
+          .catch(() => null);
+        if (!otherApproved) {
+          await runWithSchemaRepair(() =>
+            db
+              .prepare("UPDATE members SET verification_status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+              .bind(effectiveMemberId)
+              .run(),
+          );
+        }
+      }
+    }
+
+    invalidateSessionCacheForUser(resolvedMember?.auth_user_id || targetRole?.auth_user_id, effectiveMemberId);
+
+    const updatedRoleRow = effectiveRoleId
+      ? await db
+          .prepare(
+            "SELECT mr.*, m.full_name as member_name, m.phone as member_phone, m.email as member_email, m.city as member_city, m.province as member_province FROM member_roles mr LEFT JOIN members m ON mr.member_id = m.id WHERE mr.id = ? LIMIT 1",
+          )
+          .bind(effectiveRoleId)
+          .first<any>()
+          .catch(() => null)
+      : null;
+
+    const updatedMemberRow = effectiveMemberId
+      ? await db.prepare("SELECT * FROM members WHERE id = ? LIMIT 1").bind(effectiveMemberId).first<any>().catch(() => null)
+      : null;
+
+    let enrichedUpdatedMember = updatedMemberRow;
+    if (updatedMemberRow) {
+      const mRoles = await db
+        .prepare("SELECT * FROM member_roles WHERE member_id = ? ORDER BY created_at DESC")
+        .bind(updatedMemberRow.id)
+        .all<any>()
+        .catch(() => ({ results: [] }));
+      enrichedUpdatedMember = { ...updatedMemberRow, member_roles: mRoles.results || [] };
     }
 
     await recordAuditLog({
@@ -2371,30 +2609,99 @@ export async function updateRoleApprovalStatus(
       actorRole: "admin",
       action: status === "approved" ? "approve_member_role" : "reject_member_role",
       targetType: "member_role",
-      targetId: roleId,
-      details: `${status} برای عضو ${targetRole?.full_name || memberId}`,
+      targetId: effectiveRoleId || cleanRoleId,
+      details: `${status} برای عضو ${updatedMemberRow?.full_name || targetRole?.full_name || effectiveMemberId}`,
     });
 
-    if (targetRole?.phone) {
+    const smsPhone = updatedMemberRow?.phone || targetRole?.phone;
+    const smsName = updatedMemberRow?.full_name || targetRole?.full_name || "کاربر گرامی";
+    if (smsPhone) {
       Promise.resolve(
         sendEventNotificationSms({
-          mobile: targetRole.phone,
+          mobile: smsPhone,
           eventType: status === "approved" ? "role_approved" : "role_rejected",
           messageText:
             status === "approved"
-              ? `ترابار: عضویت و دسترسی ${targetRole.role_code} برای حساب ${targetRole.full_name} تأیید و فعال شد.`
-              : `ترابار: درخواست ارتقای نقش ${targetRole.role_code} تأیید نشد. جزئیات را در حساب کاربری ببینید.`,
-          relatedId: memberId,
+              ? `ترابار: عضویت و دسترسی ${effectiveRoleCode} برای حساب ${smsName} تأیید و فعال شد.`
+              : `ترابار: درخواست ارتقای نقش ${effectiveRoleCode} تأیید نشد. جزئیات را در حساب کاربری ببینید.`,
+          relatedId: effectiveMemberId,
         }),
       ).catch((smsErr) => {
         console.warn("[d1] role approval sms error:", smsErr);
       });
     }
 
-    return updated;
-  } catch (err) {
+    return {
+      success: roleUpdated || Boolean(updatedMemberRow),
+      member: enrichedUpdatedMember,
+      roleRequest: updatedRoleRow,
+    };
+  } catch (err: any) {
     console.error("[d1] updateRoleApprovalStatus error:", err);
-    return false;
+    return {
+      success: false,
+      error: err?.message || "خطای پایگاه داده در به‌روزرسانی وضعیت درخواست",
+    };
+  }
+}
+
+export async function deleteRoleRequest(
+  roleId: string,
+  memberId?: string,
+  actorUserId = "admin_user_main",
+): Promise<{ success: boolean; message: string }> {
+  try {
+    await initD1Schema();
+    const db = getD1();
+    const cleanRoleId = (roleId || "").trim();
+    const cleanMemberId = (memberId || "").trim();
+
+    const existing = cleanRoleId
+      ? await db.prepare("SELECT * FROM member_roles WHERE id = ? LIMIT 1").bind(cleanRoleId).first<any>()
+      : null;
+
+    if (existing) {
+      await db.prepare("DELETE FROM member_roles WHERE id = ?").bind(existing.id).run();
+      await recordAuditLog({
+        actorUserId,
+        actorRole: "admin",
+        action: "delete_role_request",
+        targetType: "member_role",
+        targetId: existing.id,
+        details: `حذف درخواست نقش ${existing.role_code} عضو ${existing.member_id}`,
+      });
+      return { success: true, message: "درخواست با موفقیت حذف شد." };
+    }
+
+    // If it was a synthetic pending request tied directly to a member without member_roles row
+    const targetMemId = cleanMemberId || cleanRoleId;
+    if (targetMemId) {
+      await db.prepare("DELETE FROM member_roles WHERE member_id = ? AND approval_status = 'pending'").bind(targetMemId).run();
+      const mem = await db.prepare("SELECT id, verification_status, auth_user_id FROM members WHERE id = ? LIMIT 1").bind(targetMemId).first<any>();
+      if (mem) {
+        if (mem.verification_status === "pending") {
+          await db
+            .prepare("UPDATE members SET verification_status = 'rejected', role = 'buyer', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(mem.id)
+            .run();
+        }
+        invalidateSessionCacheForUser(mem.auth_user_id, mem.id);
+        await recordAuditLog({
+          actorUserId,
+          actorRole: "admin",
+          action: "delete_role_request",
+          targetType: "member",
+          targetId: mem.id,
+          details: "حذف درخواست در انتظار بررسی",
+        });
+        return { success: true, message: "درخواست با موفقیت حذف شد." };
+      }
+    }
+
+    return { success: false, message: "درخواست مورد نظر برای حذف پیدا نشد." };
+  } catch (err: any) {
+    console.error("[d1] deleteRoleRequest error:", err);
+    return { success: false, message: err?.message || "خطا در حذف درخواست" };
   }
 }
 
@@ -2468,10 +2775,20 @@ export async function getMemberSellingStatus(userId: string): Promise<{
     const hasSeller = isSeller || rows.some((r) => ["seller", "bar_seller"].includes(r.role_code));
     const hasSpecialBuyer = isSpecialBuyer || rows.some((r) => ["special_buyer", "buyer_special"].includes(r.role_code));
 
-    const supplierApproved = rows.some((r) => r.role_code === "supplier" && r.approval_status === "approved");
-    const sellerApproved = rows.some((r) => ["seller", "bar_seller"].includes(r.role_code) && r.approval_status === "approved");
-    const specialBuyerApproved = rows.some((r) => ["special_buyer", "buyer_special"].includes(r.role_code) && r.approval_status === "approved");
-    const pendingRequest = rows.some((r) => r.approval_status === "pending");
+    const supplierApproved =
+      rows.some((r) => r.role_code === "supplier" && r.approval_status === "approved") ||
+      (isSupplier &&
+        member.verification_status === "approved" &&
+        !rows.some((r) => r.role_code === "supplier" && r.approval_status === "rejected"));
+    const sellerApproved =
+      rows.some((r) => ["seller", "bar_seller"].includes(r.role_code) && r.approval_status === "approved") ||
+      (isSeller &&
+        member.verification_status === "approved" &&
+        !rows.some((r) => ["seller", "bar_seller"].includes(r.role_code) && r.approval_status === "rejected"));
+    const specialBuyerApproved =
+      rows.some((r) => ["special_buyer", "buyer_special"].includes(r.role_code) && r.approval_status === "approved") ||
+      (isSpecialBuyer && member.verification_status === "approved");
+    const pendingRequest = rows.some((r) => r.approval_status === "pending") || member.verification_status === "pending";
 
     return {
       memberId: member.id,
@@ -3863,7 +4180,49 @@ export async function getAdminDashboardData(): Promise<any> {
     safeAll("SELECT * FROM city_neighbors ORDER BY city_name ASC"),
   ]);
 
-  const members = membersRes.results || [];
+  const members = [...(membersRes.results || [])];
+
+  // Reconcile any registered users (non-admin) missing from members table so they always show in users list
+  try {
+    const usersRes = await safeAll("SELECT * FROM users WHERE COALESCE(role, 'buyer') != 'admin' AND id != 'admin_user_main' ORDER BY created_at DESC");
+    const memberAuthIds = new Set(members.map((m) => String(m.auth_user_id || "")).filter(Boolean));
+    for (const u of usersRes.results || []) {
+      if (!memberAuthIds.has(String(u.id))) {
+        const rawRole = String(u.role || "buyer").toLowerCase();
+        const normalizedRole = rawRole === "bar_seller" ? "seller" : rawRole;
+        const isPro = normalizedRole === "seller" || normalizedRole === "supplier";
+        const newMemId = generateId("mem");
+        const verStatus = isPro ? "pending" : "approved";
+        await db
+          .prepare(
+            `INSERT INTO members (id, auth_user_id, full_name, phone, email, city, province, role, verification_status, products, is_active, is_archived, joined_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          )
+          .bind(
+            newMemId,
+            u.id,
+            u.full_name || "کاربر ترابار",
+            u.phone || null,
+            u.email || null,
+            u.city || "",
+            u.province || "",
+            normalizedRole,
+            verStatus,
+            u.activity || "",
+          )
+          .run()
+          .catch(() => {});
+        const insertedMem = await db.prepare("SELECT * FROM members WHERE id = ? LIMIT 1").bind(newMemId).first<any>().catch(() => null);
+        if (insertedMem) {
+          members.unshift(insertedMem);
+          memberAuthIds.add(String(u.id));
+        }
+      }
+    }
+  } catch {
+    // Non-fatal reconciliation guard
+  }
+
   const roles = [...(roleRequestsRes.results || [])];
   const rolesByMember = new Map<string, any[]>();
   for (const r of roles) {
@@ -3941,7 +4300,7 @@ export async function getAdminDashboardData(): Promise<any> {
 
 export async function adminUpdateMember(params: {
   memberId: string;
-  action: "edit" | "archive" | "restore";
+  action: "edit" | "archive" | "restore" | "delete" | "approve";
   data?: { fullName?: string; phone?: string; email?: string; city?: string; province?: string; role?: string; verificationStatus?: string };
   actorUserId: string;
 }): Promise<boolean> {
@@ -3958,6 +4317,32 @@ export async function adminUpdateMember(params: {
       .prepare("UPDATE members SET is_archived = 0, is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
       .bind(params.memberId)
       .run();
+  } else if (params.action === "approve") {
+    const res = await updateRoleApprovalStatus(params.memberId, "approved", params.actorUserId, {
+      memberId: params.memberId,
+    });
+    return res.success;
+  } else if (params.action === "delete") {
+    const member = await db.prepare("SELECT * FROM members WHERE id = ? LIMIT 1").bind(params.memberId).first<any>();
+    if (!member) return false;
+    if (member.auth_user_id === "admin_user_main") return false;
+
+    const cleanupQueries = [
+      () => db.prepare("DELETE FROM member_roles WHERE member_id = ?").bind(params.memberId).run(),
+      () => db.prepare("DELETE FROM seller_bank_accounts WHERE member_id = ?").bind(params.memberId).run(),
+      () => db.prepare("DELETE FROM admin_users WHERE auth_user_id = ? AND admin_role != 'main_admin'").bind(member.auth_user_id || "").run(),
+      () => db.prepare("DELETE FROM sessions WHERE user_id = ?").bind(member.auth_user_id || "").run(),
+      () => db.prepare("DELETE FROM carts WHERE user_id = ?").bind(member.auth_user_id || "").run(),
+    ];
+    for (const q of cleanupQueries) {
+      await q().catch(() => {});
+    }
+
+    await db.prepare("DELETE FROM members WHERE id = ?").bind(params.memberId).run();
+    if (member.auth_user_id && member.auth_user_id !== "admin_user_main") {
+      await db.prepare("DELETE FROM users WHERE id = ?").bind(member.auth_user_id).run().catch(() => {});
+    }
+    invalidateSessionCacheForUser(member.auth_user_id, params.memberId);
   } else if (params.action === "edit" && params.data) {
     const member = await db.prepare("SELECT * FROM members WHERE id = ? LIMIT 1").bind(params.memberId).first<any>();
     if (!member) return false;
@@ -3977,12 +4362,37 @@ export async function adminUpdateMember(params: {
       .bind(fullName, phone, email, city, province, role, verStatus, params.memberId)
       .run();
 
+    if (verStatus === "approved" && role && role !== "buyer") {
+      const normalizedRole = role === "bar_seller" ? "seller" : role;
+      const existingRole = await db
+        .prepare("SELECT id FROM member_roles WHERE member_id = ? AND role_code IN (?, ?) LIMIT 1")
+        .bind(params.memberId, normalizedRole, role)
+        .first<any>()
+        .catch(() => null);
+      if (existingRole) {
+        await db
+          .prepare("UPDATE member_roles SET approval_status = 'approved', approved_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .bind(existingRole.id)
+          .run()
+          .catch(() => {});
+      } else {
+        await db
+          .prepare(
+            "INSERT INTO member_roles (id, member_id, role_code, approval_status, request_note, approved_at, created_at) VALUES (?, ?, ?, 'approved', 'تأیید‌شده از طریق ویرایش عضو', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+          )
+          .bind(generateId("role"), params.memberId, normalizedRole)
+          .run()
+          .catch(() => {});
+      }
+    }
+
     if (member.auth_user_id) {
       await db
         .prepare("UPDATE users SET full_name = ?, phone = ?, email = ?, city = ?, province = ?, role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(fullName, phone, email, city, province, role, member.auth_user_id)
         .run();
     }
+    invalidateSessionCacheForUser(member.auth_user_id, params.memberId);
   }
 
   await recordAuditLog({

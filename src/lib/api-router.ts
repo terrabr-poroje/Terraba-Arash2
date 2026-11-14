@@ -19,6 +19,7 @@ import {
   getAdminRecoveryEmail,
   getPendingRoleRequests,
   updateRoleApprovalStatus,
+  deleteRoleRequest,
   submitMembershipRequest,
   getMyRoleRequests,
   resubmitSellingApprovalRequest,
@@ -1296,37 +1297,65 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
         z.object({
           roleId: z.string().min(1).optional(),
           id: z.string().min(1).optional(),
+          memberId: z.string().optional(),
+          roleCode: z.string().optional(),
           action: z.enum(["approved", "rejected"]),
         }),
       );
       if (parsed.error || !parsed.data) return jsonResponse({ success: false, message: parsed.error }, 400);
 
-      const targetId = (parsed.data.roleId || parsed.data.id || "").trim();
+      const targetId = (parsed.data.roleId || parsed.data.id || parsed.data.memberId || "").trim();
       if (!targetId) {
         return jsonResponse({ success: false, message: "شناسه درخواست عضویت نامعتبر است." }, 400);
       }
 
-      const success = await updateRoleApprovalStatus(
+      const result = await updateRoleApprovalStatus(
         targetId,
         parsed.data.action,
         session!.user.id,
+        {
+          memberId: parsed.data.memberId,
+          roleCode: parsed.data.roleCode,
+        },
       );
-      if (!success) {
+      if (!result.success) {
         return jsonResponse(
-          { success: false, message: "درخواست مورد نظر پیدا نشد یا به‌روزرسانی وضعیت در پایگاه داده انجام نشد." },
+          {
+            success: false,
+            message: result.error || "درخواست مورد نظر پیدا نشد یا به‌روزرسانی وضعیت در پایگاه داده انجام نشد.",
+          },
           400,
         );
       }
 
       return jsonResponse({
         success: true,
-        roleId: targetId,
+        roleId: result.roleRequest?.id || targetId,
+        memberId: result.member?.id || parsed.data.memberId,
         approvalStatus: parsed.data.action,
+        member: result.member || null,
+        roleRequest: result.roleRequest || null,
         message:
           parsed.data.action === "approved"
             ? "عضویت و دسترسی با موفقیت تأیید شد."
             : "درخواست عضویت رد شد.",
       });
+    }
+
+    if (pathname === "/api/admin/delete-request" && method === "POST") {
+      const parsed = await parseJson(
+        request,
+        z.object({
+          roleId: z.string().min(1).optional(),
+          id: z.string().min(1).optional(),
+          memberId: z.string().optional(),
+        }),
+      );
+      if (parsed.error || !parsed.data) return jsonResponse({ success: false, message: parsed.error }, 400);
+
+      const targetId = (parsed.data.roleId || parsed.data.id || "").trim();
+      const res = await deleteRoleRequest(targetId, parsed.data.memberId, session!.user.id);
+      return jsonResponse(res, res.success ? 200 : 400);
     }
 
     if (pathname === "/api/admin/dashboard-data" && method === "GET") {
@@ -1339,7 +1368,7 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
         request,
         z.object({
           memberId: z.string().min(1),
-          action: z.enum(["edit", "archive", "restore"]),
+          action: z.enum(["edit", "archive", "restore", "delete", "approve"]),
           data: z
             .object({
               fullName: z.string().optional(),
@@ -1359,7 +1388,20 @@ export async function handleApiRequest(request: Request, env?: any): Promise<Res
         ...parsed.data,
         actorUserId: session!.user.id,
       });
-      return jsonResponse({ success: ok, message: ok ? "اطلاعات عضو به‌روزرسانی شد." : "عضو پیدا نشد." });
+      const actionMsg =
+        parsed.data.action === "delete"
+          ? "کاربر و درخواست‌های مرتبط با موفقیت حذف شد."
+          : parsed.data.action === "approve"
+            ? "کاربر با موفقیت تأیید و فعال شد."
+            : parsed.data.action === "archive"
+              ? "کاربر بایگانی شد."
+              : parsed.data.action === "restore"
+                ? "کاربر بازگردانی شد."
+                : "اطلاعات عضو به‌روزرسانی شد.";
+      return jsonResponse(
+        { success: ok, message: ok ? actionMsg : "عضو پیدا نشد یا امکان انجام عملیات وجود ندارد." },
+        ok ? 200 : 400,
+      );
     }
 
     if (pathname === "/api/admin/load-action" && method === "POST") {

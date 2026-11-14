@@ -108,13 +108,6 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     ],
     links: [
       {
-        rel: "preload",
-        href: "/fonts/vazirmatn/Vazirmatn-Variable.woff2",
-        as: "font",
-        type: "font/woff2",
-        crossOrigin: "anonymous",
-      },
-      {
         rel: "stylesheet",
         href: appCss,
       },

@@ -330,6 +330,8 @@ function AdminPage() {
   const [requests, setRequests] = useState<MemberRequest[]>([]);
   const [allRoleRequests, setAllRoleRequests] = useState<MemberRequest[]>([]);
   const [requestFilter, setRequestFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
+  const [memberFilter, setMemberFilter] = useState<"all" | "approved" | "pending" | "archived">("all");
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string>("");
   const [actionFeedback, setActionFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [members, setMembers] = useState<CityMember[]>([]);
   const [loads, setLoads] = useState<AdminLoad[]>([]);
@@ -466,19 +468,26 @@ function AdminPage() {
   async function handleApproveRequest(request: MemberRequest, action: "approved" | "rejected") {
     setBusyId(request.id);
     setActionFeedback(null);
-    const res = await apiPost<any>("/api/admin/approve-request", { roleId: request.id, action });
+    const res = await apiPost<any>("/api/admin/approve-request", {
+      roleId: request.id,
+      memberId: request.member_id,
+      roleCode: request.role_code,
+      action,
+    });
     setBusyId("");
     if (res.ok && res.data?.success) {
       const nowIso = new Date().toISOString();
       const wasPending = request.approval_status === "pending";
       const matchReq = (r: MemberRequest) =>
         r.id === request.id || (r.member_id === request.member_id && r.role_code === request.role_code);
+      const returnedRoleId = res.data?.roleRequest?.id || res.data?.roleId || request.id;
 
       setAllRoleRequests((prev) =>
         prev.map((r) =>
           matchReq(r)
             ? {
                 ...r,
+                id: returnedRoleId,
                 approval_status: action,
                 approved_at: action === "approved" ? nowIso : r.approved_at,
               }
@@ -486,21 +495,50 @@ function AdminPage() {
         ),
       );
       setRequests((prev) => prev.filter((r) => !matchReq(r)));
-      setMembers((prev) =>
-        prev.map((m) =>
-          m.id === request.member_id
-            ? {
-                ...m,
-                verification_status: action,
-                member_roles: (m.member_roles || []).map((mr) =>
-                  mr.id === request.id || mr.role_code === request.role_code
-                    ? { ...mr, approval_status: action }
-                    : mr,
-                ),
-              }
-            : m,
-        ),
-      );
+
+      const serverMember = res.data?.member as CityMember | null;
+      setMembers((prev) => {
+        const targetMemberId = serverMember?.id || request.member_id;
+        const exists = prev.some((m) => m.id === targetMemberId);
+        if (exists) {
+          return prev.map((m) =>
+            m.id === targetMemberId
+              ? {
+                  ...m,
+                  ...(serverMember || {}),
+                  verification_status: action,
+                  is_archived: 0,
+                  member_roles:
+                    serverMember?.member_roles ||
+                    (m.member_roles || []).map((mr) =>
+                      mr.id === request.id || mr.role_code === request.role_code
+                        ? { ...mr, id: returnedRoleId, approval_status: action }
+                        : mr,
+                    ),
+                }
+              : m,
+          );
+        }
+        if (serverMember) {
+          return [serverMember, ...prev];
+        }
+        return [
+          {
+            id: targetMemberId,
+            full_name: request.member_name || "کاربر ترابار",
+            phone: request.member_phone || null,
+            email: request.member_email || null,
+            city: request.member_city || "",
+            province: request.member_province || "",
+            role: request.role_code || "buyer",
+            verification_status: action,
+            is_archived: 0,
+            member_roles: [{ id: returnedRoleId, role_code: request.role_code, approval_status: action }],
+          },
+          ...prev,
+        ];
+      });
+
       if (wasPending && action === "approved") {
         setPerfStats((prev) =>
           prev ? { ...prev, approvedMembers: prev.approvedMembers + 1 } : prev,
@@ -522,21 +560,90 @@ function AdminPage() {
     }
   }
 
-  async function handleMemberAction(memberId: string, action: "archive" | "restore") {
-    if (
-      action === "archive" &&
-      !window.confirm("آیا از بایگانی کردن این عضو مطمئن هستید؟ سوابق مالی و سفارش‌ها محفوظ می‌مانند.")
-    ) {
-      return;
-    }
-    setBusyId(memberId);
-    const res = await apiPost("/api/admin/member-action", { memberId, action });
+  async function handleDeleteRequest(request: MemberRequest) {
+    setBusyId(request.id);
+    setActionFeedback(null);
+    setConfirmDeleteKey("");
+    const res = await apiPost<any>("/api/admin/delete-request", {
+      roleId: request.id,
+      memberId: request.member_id,
+    });
     setBusyId("");
     if (res.ok && res.data?.success) {
-      toast.success(action === "archive" ? "عضو بایگانی شد." : "عضو با موفقیت بازگردانی شد.");
-      void refresh();
+      const matchReq = (r: MemberRequest) =>
+        r.id === request.id || (r.member_id === request.member_id && r.role_code === request.role_code);
+      setAllRoleRequests((prev) => prev.filter((r) => !matchReq(r)));
+      setRequests((prev) => prev.filter((r) => !matchReq(r)));
+      const msg = res.data?.message || "درخواست با موفقیت حذف شد.";
+      setActionFeedback({ type: "success", text: msg });
+      toast.success(msg);
+      void refresh(true);
     } else {
-      toast.error(res.data?.message || "عملیات روی عضو انجام نشد.");
+      const msg = res.data?.message || "حذف درخواست انجام نشد.";
+      setActionFeedback({ type: "error", text: msg });
+      toast.error(msg);
+    }
+  }
+
+  async function handleMemberAction(
+    memberId: string,
+    action: "archive" | "restore" | "delete" | "approve",
+  ) {
+    setBusyId(memberId);
+    setActionFeedback(null);
+    setConfirmDeleteKey("");
+    const res = await apiPost<any>("/api/admin/member-action", { memberId, action });
+    setBusyId("");
+    if (res.ok && res.data?.success) {
+      if (action === "delete") {
+        setMembers((prev) => prev.filter((m) => m.id !== memberId));
+        setAllRoleRequests((prev) => prev.filter((r) => r.member_id !== memberId));
+        setRequests((prev) => prev.filter((r) => r.member_id !== memberId));
+      } else if (action === "approve") {
+        setMembers((prev) =>
+          prev.map((m) =>
+            m.id === memberId
+              ? {
+                  ...m,
+                  verification_status: "approved",
+                  is_archived: 0,
+                  member_roles: (m.member_roles || []).map((mr) => ({ ...mr, approval_status: "approved" })),
+                }
+              : m,
+          ),
+        );
+        setAllRoleRequests((prev) =>
+          prev.map((r) =>
+            r.member_id === memberId
+              ? { ...r, approval_status: "approved", approved_at: new Date().toISOString() }
+              : r,
+          ),
+        );
+        setRequests((prev) => prev.filter((r) => r.member_id !== memberId));
+      } else {
+        setMembers((prev) =>
+          prev.map((m) =>
+            m.id === memberId ? { ...m, is_archived: action === "archive" ? 1 : 0 } : m,
+          ),
+        );
+      }
+
+      const msg =
+        res.data?.message ||
+        (action === "delete"
+          ? "کاربر با موفقیت حذف شد."
+          : action === "approve"
+            ? "کاربر با موفقیت تأیید شد."
+            : action === "archive"
+              ? "عضو بایگانی شد."
+              : "عضو با موفقیت بازگردانی شد.");
+      setActionFeedback({ type: "success", text: msg });
+      toast.success(msg);
+      void refresh(true);
+    } else {
+      const msg = res.data?.message || "عملیات روی عضو انجام نشد.";
+      setActionFeedback({ type: "error", text: msg });
+      toast.error(msg);
     }
   }
 
@@ -1261,6 +1368,38 @@ function AdminPage() {
                           {isBusy ? "در حال ثبت…" : "رد درخواست"}
                         </Button>
                       )}
+                      {confirmDeleteKey === `req:${req.id}` ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={isBusy}
+                            onClick={() => void handleDeleteRequest(req)}
+                          >
+                            <Trash2 className="ml-1 size-4" />
+                            تأیید حذف درخواست
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={isBusy}
+                            onClick={() => setConfirmDeleteKey("")}
+                          >
+                            انصراف
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={isBusy}
+                          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          onClick={() => setConfirmDeleteKey(`req:${req.id}`)}
+                        >
+                          <Trash2 className="ml-1 size-4" />
+                          حذف درخواست
+                        </Button>
+                      )}
                     </div>
                   </div>
                 );
@@ -1493,16 +1632,74 @@ function AdminPage() {
           </div>
         )}
 
-        {/* TAB: MEMBERS + EDIT / ARCHIVE / RESTORE */}
-        {tab === "members" && (
+        {/* TAB: MEMBERS + APPROVE / EDIT / ARCHIVE / DELETE */}
+        {tab === "members" && (() => {
+          const approvedMembersCount = members.filter(
+            (m) => !m.is_archived && m.verification_status === "approved",
+          ).length;
+          const pendingMembersCount = members.filter(
+            (m) => !m.is_archived && m.verification_status !== "approved",
+          ).length;
+          const archivedMembersCount = members.filter((m) => Boolean(m.is_archived)).length;
+          const filteredMembers = members.filter((m) => {
+            if (memberFilter === "approved") return !m.is_archived && m.verification_status === "approved";
+            if (memberFilter === "pending") return !m.is_archived && m.verification_status !== "approved";
+            if (memberFilter === "archived") return Boolean(m.is_archived);
+            return true;
+          });
+
+          return (
           <div className="mt-6 grid gap-3">
-            {members.length === 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant={memberFilter === "all" ? "default" : "outline"}
+                onClick={() => setMemberFilter("all")}
+              >
+                همه کاربران ({faNumber(members.length)})
+              </Button>
+              <Button
+                size="sm"
+                variant={memberFilter === "approved" ? "default" : "outline"}
+                onClick={() => setMemberFilter("approved")}
+              >
+                تأییدشده ({faNumber(approvedMembersCount)})
+              </Button>
+              <Button
+                size="sm"
+                variant={memberFilter === "pending" ? "default" : "outline"}
+                onClick={() => setMemberFilter("pending")}
+              >
+                در انتظار / سایر ({faNumber(pendingMembersCount)})
+              </Button>
+              <Button
+                size="sm"
+                variant={memberFilter === "archived" ? "default" : "outline"}
+                onClick={() => setMemberFilter("archived")}
+              >
+                بایگانی‌شده ({faNumber(archivedMembersCount)})
+              </Button>
+            </div>
+
+            {filteredMembers.length === 0 ? (
               <p className="rounded-xl border border-border bg-card p-8 text-center text-sm text-muted-foreground">
-                عضوی ثبت نشده است.
+                کاربری در این بخش یافت نشد.
               </p>
             ) : (
-              members.map((member) => (
-                <article key={member.id} className="rounded-xl border border-border bg-card p-4">
+              filteredMembers.map((member) => {
+                const isMemBusy = busyId === member.id;
+                const isMemApproved = member.verification_status === "approved";
+                const isMainAdminMem = member.auth_user_id === "admin_user_main";
+
+                return (
+                <article
+                  key={member.id}
+                  className={`rounded-xl border p-4 ${
+                    isMemApproved
+                      ? "border-emerald-500/40 bg-card"
+                      : "border-border bg-card"
+                  }`}
+                >
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div>
                       <strong>{member.full_name}</strong>
@@ -1514,8 +1711,16 @@ function AdminPage() {
                         {member.phone || "—"} {member.email ? `· ${member.email}` : ""}
                       </p>
                     </div>
-                    <span className="rounded-full bg-secondary px-2.5 py-1 text-xs">
-                      {member.verification_status === "approved"
+                    <span
+                      className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                        isMemApproved
+                          ? "bg-emerald-600 text-white"
+                          : member.verification_status === "rejected"
+                            ? "bg-destructive text-destructive-foreground"
+                            : "bg-amber-500/15 text-amber-800 dark:text-amber-200"
+                      }`}
+                    >
+                      {isMemApproved
                         ? "تأییدشده"
                         : member.verification_status === "rejected"
                           ? "ردشده"
@@ -1524,6 +1729,16 @@ function AdminPage() {
                   </div>
 
                   <div className="mt-3 flex flex-wrap gap-2">
+                    {!isMemApproved && (
+                      <Button
+                        size="sm"
+                        disabled={isMemBusy}
+                        onClick={() => void handleMemberAction(member.id, "approve")}
+                      >
+                        <CheckCircle2 className="ml-1 size-3.5" />
+                        {isMemBusy ? "در حال تأیید…" : "تأیید و فعال‌سازی"}
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       variant="outline"
@@ -1547,7 +1762,7 @@ function AdminPage() {
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={busyId === member.id}
+                        disabled={isMemBusy}
                         onClick={() => void handleMemberAction(member.id, "restore")}
                       >
                         بازگردانی عضو
@@ -1556,12 +1771,45 @@ function AdminPage() {
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={busyId === member.id}
+                        disabled={isMemBusy}
                         onClick={() => void handleMemberAction(member.id, "archive")}
                       >
                         بایگانی عضو
                       </Button>
                     )}
+                    {!isMainAdminMem &&
+                      (confirmDeleteKey === `mem:${member.id}` ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={isMemBusy}
+                            onClick={() => void handleMemberAction(member.id, "delete")}
+                          >
+                            <Trash2 className="ml-1 size-3.5" />
+                            تأیید حذف کاربر
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={isMemBusy}
+                            onClick={() => setConfirmDeleteKey("")}
+                          >
+                            انصراف
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={isMemBusy}
+                          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          onClick={() => setConfirmDeleteKey(`mem:${member.id}`)}
+                        >
+                          <Trash2 className="ml-1 size-3.5" />
+                          حذف کاربر
+                        </Button>
+                      ))}
                   </div>
 
                   {editingMemberId === member.id && (
@@ -1676,10 +1924,12 @@ function AdminPage() {
                     </form>
                   )}
                 </article>
-              ))
+                );
+              })
             )}
           </div>
-        )}
+          );
+        })()}
 
         {/* TAB: ORDERS */}
         {tab === "orders" && (

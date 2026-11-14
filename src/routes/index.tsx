@@ -26,8 +26,8 @@ function Index() {
       <section className="relative bg-market-surface">
         <div className="site-container py-8 sm:py-12 lg:py-16">
           <div className="relative isolate overflow-hidden rounded-3xl bg-emerald-950 px-5 py-8 text-white shadow-xl sm:px-9 sm:py-11 lg:px-14 lg:py-14">
-            <div aria-hidden="true" className="pointer-events-none absolute -left-16 -top-24 size-72 rounded-full border-[36px] border-white/5 sm:size-96" />
-            <div aria-hidden="true" className="pointer-events-none absolute -bottom-24 left-1/3 size-64 rounded-full bg-emerald-700/30 blur-3xl" />
+            <div aria-hidden="true" className="pointer-events-none absolute -left-16 -top-24 hidden size-72 rounded-full border-[36px] border-white/5 sm:block sm:size-96" />
+            <div aria-hidden="true" className="pointer-events-none absolute -bottom-24 left-1/3 hidden size-64 rounded-full bg-emerald-700/25 blur-2xl sm:block" />
             <div className="relative grid items-center gap-9 lg:grid-cols-[1.2fr_0.8fr] lg:gap-12">
               <div className="max-w-2xl">
                 <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-xs font-semibold text-emerald-50">
@@ -35,10 +35,7 @@ function Index() {
                   از باغ تا بازار، در یک مسیر
                 </div>
                 <p className="text-sm font-bold tracking-wide text-emerald-200">TERRABAR <span className="mx-1 text-white/40">|</span> ترابار</p>
-                <h1
-                  className="mt-3 text-3xl font-black leading-relaxed sm:text-4xl lg:text-5xl"
-                  style={{ fontFamily: "'Vazirmatn', 'B Nazanin', 'BNazanin', Tahoma, sans-serif" }}
-                >
+                <h1 className="mt-3 text-3xl font-black leading-relaxed sm:text-4xl lg:text-5xl">
                   بازار میوه و تره‌بار ایران
                 </h1>
                 <p className="mt-4 max-w-xl text-sm leading-8 text-emerald-50/90 sm:text-base">
@@ -66,7 +63,7 @@ function Index() {
                 >
                   مرحله بعد <ArrowLeft className="size-5" />
                 </Link>
-                <div className="absolute -bottom-4 -left-3 -z-10 size-24 rounded-2xl bg-lime-300/20 blur-xl" />
+                <div className="absolute -bottom-4 -left-3 -z-10 hidden size-24 rounded-2xl bg-lime-300/20 blur-lg sm:block" />
               </div>
             </div>
           </div>

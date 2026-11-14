@@ -1,89 +1,7 @@
 @font-face {
   font-family: 'Vazirmatn';
-  src: url('/fonts/vazirmatn/Vazirmatn-Variable.woff2') format('woff2 supports variations'),
-       url('/fonts/vazirmatn/Vazirmatn-Variable.woff2') format('woff2-variations'),
-       url('/fonts/vazirmatn/Vazirmatn-Regular.woff2') format('woff2');
+  src: url('/fonts/vazirmatn/Vazirmatn-Variable.woff2') format('woff2');
   font-weight: 100 900;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Vazirmatn';
-  src: url('/fonts/vazirmatn/Vazirmatn-Regular.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Vazirmatn';
-  src: url('/fonts/vazirmatn/Vazirmatn-Medium.woff2') format('woff2');
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Vazirmatn';
-  src: url('/fonts/vazirmatn/Vazirmatn-SemiBold.woff2') format('woff2');
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Vazirmatn';
-  src: url('/fonts/vazirmatn/Vazirmatn-Bold.woff2') format('woff2');
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Vazirmatn';
-  src: url('/fonts/vazirmatn/Vazirmatn-ExtraBold.woff2') format('woff2');
-  font-weight: 800;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Vazirmatn';
-  src: url('/fonts/vazirmatn/Vazirmatn-Black.woff2') format('woff2');
-  font-weight: 900;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'B Nazanin';
-  src: url('/fonts/b-nazanin/BNazanin.ttf') format('truetype');
-  font-weight: normal;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'B Nazanin';
-  src: url('/fonts/b-nazanin/BNaznnBd.ttf') format('truetype');
-  font-weight: bold;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'BNazanin';
-  src: url('/fonts/b-nazanin/BNazanin.ttf') format('truetype');
-  font-weight: normal;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'BNazanin';
-  src: url('/fonts/b-nazanin/BNaznnBd.ttf') format('truetype');
-  font-weight: bold;
   font-style: normal;
   font-display: swap;
 }
@@ -136,7 +54,7 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-ring-offset-background: var(--background);
-  --font-sans: 'Vazirmatn', 'B Nazanin', 'BNazanin', Tahoma, sans-serif;
+  --font-sans: 'Vazirmatn', system-ui, -apple-system, BlinkMacSystemFont, Tahoma, sans-serif;
   --color-market-surface: var(--market-surface);
   --color-footer: var(--footer);
   --color-footer-foreground: var(--footer-foreground);
