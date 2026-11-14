@@ -6,10 +6,10 @@ import { renderErrorPage } from "./lib/error-page";
 import { handleApiRequest } from "./lib/api-router";
 import { toPersianErrorMessage } from "./lib/error-messages";
 import {
+  appendVaryHeader,
   applyApiCorsHeaders,
   applyFontCacheHeaders,
-  buildCompressedResponse,
-  isCompressibleContentType,
+  buildSafeBufferedResponse,
 } from "./lib/http-compression";
 
 type ServerEntry = {
@@ -130,12 +130,6 @@ export default {
                 });
               }
 
-              const assetContentType = headers.get("content-type") || "";
-              if (!isFontPath(url.pathname) && isCompressibleContentType(assetContentType) && !headers.get("content-encoding")) {
-                const rawBytes = new Uint8Array(await assetResponse.arrayBuffer());
-                return buildCompressedResponse(rawBytes, assetResponse.status, headers, request);
-              }
-
               return new Response(assetResponse.body, {
                 status: assetResponse.status,
                 headers,
@@ -162,7 +156,7 @@ export default {
         });
       }
 
-      // Unified API router with universal CORS + Gzip/Brotli response compression
+      // Unified API router with universal CORS headers
       if (url.pathname.startsWith("/api/")) {
         try {
           const resolvedEnv =
@@ -173,15 +167,10 @@ export default {
           if (apiResponse) {
             const apiHeaders = new Headers(apiResponse.headers);
             applyBaselineHeaders(apiHeaders);
+            appendVaryHeader(apiHeaders, "Accept-Encoding");
 
             if (apiResponse.status === 204 || apiResponse.status === 205 || apiResponse.status === 304) {
               return new Response(null, { status: apiResponse.status, headers: apiHeaders });
-            }
-
-            const apiCt = apiHeaders.get("content-type") || "";
-            if (isCompressibleContentType(apiCt) && !apiHeaders.get("content-encoding")) {
-              const apiBytes = new Uint8Array(await apiResponse.arrayBuffer());
-              return buildCompressedResponse(apiBytes, apiResponse.status, apiHeaders, request);
             }
 
             return new Response(apiResponse.body, {
@@ -202,7 +191,7 @@ export default {
               message: toPersianErrorMessage(apiError, "خطای داخلی سرور در پردازش درخواست."),
             }),
           );
-          return buildCompressedResponse(errBytes, 500, errHeaders, request);
+          return buildSafeBufferedResponse(errBytes, 500, errHeaders, request);
         }
       }
 
@@ -220,8 +209,8 @@ export default {
         });
       }
 
-      // Buffer SSR HTML completely with Gzip/Brotli compression + exact Content-Length,
-      // and strip Link preload bloat so Hamrah-e-Aval (MCI) DPI never stalls chunked streams.
+      // Buffer SSR HTML as clean UTF-8 with exact Content-Length (without no-transform),
+      // so Cloudflare Edge applies Brotli/Gzip cleanly and proxies never misrender raw binary.
       const contentType = (responseHeaders.get("content-type") ?? "").toLowerCase();
       if (contentType.includes("text/html") && request.method.toUpperCase() !== "HEAD") {
         const htmlText = await normalized.text();
@@ -229,10 +218,11 @@ export default {
         responseHeaders.delete("link");
         responseHeaders.set("Content-Type", "text/html; charset=utf-8");
         responseHeaders.set("Cache-Control", "public, max-age=0, must-revalidate");
-        return buildCompressedResponse(htmlBytes, normalized.status, responseHeaders, request);
+        return buildSafeBufferedResponse(htmlBytes, normalized.status, responseHeaders, request);
       }
 
-      responseHeaders.set("Cache-Control", "private, no-cache, no-transform");
+      responseHeaders.set("Cache-Control", "private, no-cache");
+      appendVaryHeader(responseHeaders, "Accept-Encoding");
       return new Response(normalized.body, {
         status: normalized.status,
         headers: responseHeaders,
@@ -245,7 +235,7 @@ export default {
       });
       applyBaselineHeaders(errHeaders);
       const errBytes = new TextEncoder().encode(renderErrorPage());
-      return buildCompressedResponse(errBytes, 500, errHeaders, request);
+      return buildSafeBufferedResponse(errBytes, 500, errHeaders, request);
     }
   },
 };

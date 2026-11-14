@@ -67,9 +67,9 @@
   - `Access-Control-Allow-Origin: *` (ضروری برای Preload در Safari)
   - `Cross-Origin-Resource-Policy: cross-origin` و `Content-Type` دقیق فونت (`font/woff2`, `font/ttf` و ...)
 
-### ز) اصلاح سراسری CORS برای تمام APIها و لایه فشرده‌سازی Gzip / Brotli
+### ز) اصلاح سراسری CORS برای تمام APIها و پشتیبانی استاندارد از فشرده‌سازی Gzip / Brotli
 - **CORS یکپارچه روی تمام مسیرهای `/api/*`:** در `vite.config.ts`، `src/lib/api-router.ts` و `src/server.ts` تمامی پاسخ‌های API (موفق، خطا و `OPTIONS` پیش‌پرواز) دارای هدرهای `Access-Control-Allow-Origin: *`، `Access-Control-Allow-Methods`، `Access-Control-Allow-Headers` و `Vary: Origin, Accept-Encoding` هستند.
-- **فشرده‌سازی پاسخ سرور (Brotli / Gzip):** ماژول `src/lib/http-compression.ts` در لایه پاسخ `src/server.ts` و میدل‌ویر `vite.config.ts` پاسخ‌های متنی/JSON/HTML/JS/CSS/SVG بزرگ‌تر از ۵۱۲ بایت را بر اساس هدر `Accept-Encoding` مرورگر با الگوریتم **Brotli (`br`)** یا **Gzip (`gzip`)** فشرده و با `Content-Length` دقیق ارسال می‌کند.
+- **پشتیبانی استاندارد از فشرده‌سازی لبه (Cloudflare Edge Gzip / Brotli):** در `src/server.ts` دستور `no-transform` از `Cache-Control` حذف شده و هدر `Vary: Accept-Encoding` به همراه `Content-Length` دقیق و UTF-8 تمیز ارسال می‌شود تا لبه Cloudflare و پروکسی‌ها بدون احتمال تداخل یا خراب شدن باینری در لایه‌های میانی، فشرده‌سازی **Brotli (`br`)** و **Gzip (`gzip`)** را به‌صورت ایمن اعمال کنند.
 
 ---
 

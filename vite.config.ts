@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import zlib from "node:zlib";
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 import type { Connect, Plugin } from "vite";
 
@@ -30,57 +29,6 @@ function applyCorsHeaders(res: any): void {
     res.setHeader(k, v);
   }
   res.setHeader("Vary", "Origin, Accept-Encoding");
-}
-
-function sendCompressedBuffer(
-  req: Connect.IncomingMessage,
-  res: any,
-  rawBuf: Buffer,
-  contentType: string,
-): void {
-  const ct = (contentType || "").toLowerCase();
-  const isCompressible =
-    ct.startsWith("text/") ||
-    ct.includes("application/json") ||
-    ct.includes("application/javascript") ||
-    ct.includes("application/xml") ||
-    ct.includes("image/svg+xml");
-
-  const acceptEncoding = String(req.headers["accept-encoding"] || "").toLowerCase();
-  let outBuf = rawBuf;
-
-  if (isCompressible && rawBuf.byteLength >= 512) {
-    if (/\bbr\b/.test(acceptEncoding)) {
-      try {
-        const br = zlib.brotliCompressSync(rawBuf, {
-          params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 },
-        });
-        if (br.byteLength < rawBuf.byteLength) {
-          outBuf = br;
-          res.setHeader("Content-Encoding", "br");
-        }
-      } catch {
-        // Fallback to gzip/raw
-      }
-    } else if (/\bgzip\b/.test(acceptEncoding)) {
-      try {
-        const gz = zlib.gzipSync(rawBuf, { level: 6 });
-        if (gz.byteLength < rawBuf.byteLength) {
-          outBuf = gz;
-          res.setHeader("Content-Encoding", "gzip");
-        }
-      } catch {
-        // Fallback to raw
-      }
-    }
-  }
-
-  res.setHeader("Content-Length", String(outBuf.byteLength));
-  if ((req.method || "GET").toUpperCase() === "HEAD") {
-    res.end();
-  } else {
-    res.end(outBuf);
-  }
 }
 
 function attachSharedMiddlewares(middlewares: Connect.Server, ssrModuleLoader?: (id: string) => Promise<any>): void {
@@ -181,8 +129,13 @@ function attachSharedMiddlewares(middlewares: Connect.Server, ssrModuleLoader?: 
       }
 
       const arrBuf = await apiResponse.arrayBuffer();
-      const ct = apiResponse.headers.get("content-type") || "application/json; charset=utf-8";
-      sendCompressedBuffer(req, res, Buffer.from(arrBuf), ct);
+      const buf = Buffer.from(arrBuf);
+      res.setHeader("Content-Length", String(buf.byteLength));
+      if (method === "HEAD") {
+        res.end();
+      } else {
+        res.end(buf);
+      }
     } catch (err: any) {
       console.error("[dev api middleware error]", err);
       res.statusCode = 500;
@@ -192,7 +145,8 @@ function attachSharedMiddlewares(middlewares: Connect.Server, ssrModuleLoader?: 
         JSON.stringify({ success: false, message: err?.message || "خطای سرور در پردازش درخواست" }),
         "utf8",
       );
-      sendCompressedBuffer(req, res, errBuf, "application/json; charset=utf-8");
+      res.setHeader("Content-Length", String(errBuf.byteLength));
+      res.end(errBuf);
     }
   });
 }
